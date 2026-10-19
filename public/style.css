@@ -39,3 +39,10 @@
 .search-form input{flex:1;min-width:120px}
 .search-form select{width:auto;max-width:100%;font-size:12px}
 @media(max-width:600px){.search-form input{flex-basis:100%}.search-form select{flex:1}}
+
+/* Compact scan-friendly results: metadata/date share a row, excerpts stay brief. */
+.search-result{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 12px;padding:10px 8px}
+.search-result .search-channel{grid-column:1;grid-row:1;margin:0;line-height:1.4}
+.search-result time{grid-column:2;grid-row:1;align-self:center;white-space:nowrap}
+.search-result strong{grid-column:1 / -1;line-height:1.4;overflow-wrap:anywhere}
+.search-result p{grid-column:1 / -1;margin:0;line-height:1.45;white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;max-height:3em;overflow:hidden}
