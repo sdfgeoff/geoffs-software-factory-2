@@ -26,9 +26,9 @@ try{
  await group.getByRole('button',{name:'Older events',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.update-event').length===100);
  await page.locator('[data-update=read-all]').click();await page.locator('#updates-summary').filter({hasText:'0 unread'}).waitFor();
  await page.locator('.update-group').filter({hasText:'125 updates'}).getByRole('button',{name:'Mark unread',exact:true}).click();await page.locator('#updates-summary').filter({hasText:'125 unread'}).waitFor();
- await page.locator('.updates-settings summary').click();await page.locator('#updates-pause').selectOption('30');await page.locator('#sound-state').filter({hasText:'paused'}).waitFor();
- await page.screenshot({path:'../notifications-desktop.png',fullPage:true});
- await page.setViewportSize({width:390,height:844});await page.screenshot({path:'../notifications-mobile.png',fullPage:true});
+ await page.locator('[data-update=preferences]').click();assert.equal(await page.locator('#updates-volume').isDisabled(),true);await page.locator('#updates-sound').check();assert.equal(await page.locator('#updates-volume').isDisabled(),false);await page.locator('#updates-volume').fill('0.5');await page.locator('#updates-volume').dispatchEvent('change');assert.equal(await page.locator('#volume-value').textContent(),'50%');await page.locator('#updates-pause').selectOption('30');await page.locator('#sound-state').filter({hasText:'Paused'}).waitFor();
+ await page.screenshot({path:'../notifications-settings-desktop.png',fullPage:true});
+ await page.setViewportSize({width:390,height:844});await page.screenshot({path:'../notifications-settings-mobile.png',fullPage:true});
  assert.ok(await page.locator('.updates-drawer').evaluate(el=>el.getBoundingClientRect().width<=innerWidth));
  await page.keyboard.press('Escape');assert.equal(await page.locator('.updates-drawer').count(),0);assert.equal(await page.locator('#message-input').inputValue(),'Keep this unsent draft');
  await page.bringToFront();await page.locator(`#message-${parent.id} [data-action=thread]`).click();

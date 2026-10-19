@@ -63,3 +63,23 @@
 @media(max-width:600px){.updates-drawer{width:100vw;padding:18px}.topbar-updates>span:not(#notice-count){display:none}.topbar-updates{padding:5px}}
 .mention-count{font-size:10px;background:#f5e4cc;color:#7a4814;border-radius:10px;padding:2px 5px;margin-left:auto}
 .topbar-updates.sounds-paused::after{content:'Paused';font-size:10px;color:#795a29}
+
+/* Preferences use explicit groups and aligned controls, separate from activity. */
+.updates-tabs{display:flex;gap:4px;background:#edf1e7;border-radius:9px;padding:4px;margin-bottom:20px}
+.updates-tabs button{flex:1;min-height:38px;font-size:13px;border-radius:6px;color:#52614b}
+.updates-tabs button[aria-pressed=true]{background:#fff;color:#24382e;box-shadow:0 1px 4px #24382e18;font-weight:600}
+.updates-settings{border:0;padding:0}.updates-settings h3{font-size:19px;margin:0 0 8px}.settings-intro{font-size:12px;color:#52614b;margin-bottom:20px}
+.settings-card{min-width:0;margin:0 0 20px;padding:16px;border:1px solid #d7ded0;border-radius:10px;background:#fff}
+.settings-card legend{font-size:13px;font-weight:700;padding:0 6px;color:#34482e}
+.updates-settings .settings-switch{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0;font-size:13px}
+.settings-switch span{flex:1}.settings-switch small{display:block;font-size:12px;font-weight:400;line-height:1.5;color:#56624f;margin-top:5px}
+.updates-settings .settings-switch input{width:20px;height:20px;flex:0 0 20px;margin:0;accent-color:#49644d}
+.sound-status-row,.volume-label{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:16px 0}
+#sound-state{font-size:12px;color:#43583c;background:#edf2e7;padding:5px 8px;border-radius:6px}
+.updates-settings button{min-height:36px;padding:7px 11px;border:1px solid #ced8c5;background:#f4f7ef;color:#34482e}
+.updates-settings label:not(.settings-switch){display:block;margin:0 0 7px;font-size:12px}
+.updates-settings select{display:block;width:100%;min-height:40px;margin-bottom:8px;font-size:13px}
+.settings-hint{font-size:12px;font-weight:400;line-height:1.5;color:#56624f;margin:7px 0 14px}
+.volume-label{margin:18px 0 5px}.volume-label label{margin:0!important}.volume-label output{font-size:12px;color:#52614b;font-variant-numeric:tabular-nums}
+.updates-settings input[type=range]{max-width:none;width:100%;margin:6px 0;padding:0;accent-color:#49644d}
+.settings-muted{opacity:.65}#updates-audio-status{font-size:12px;color:#8a3b1d;margin:8px 0 0}#updates-audio-status:empty{display:none}

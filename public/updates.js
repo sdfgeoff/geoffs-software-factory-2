@@ -54,23 +54,27 @@ export class Updates {
   async show(){
     if(this.drawer){this.close();return;}
     this.returnFocus=document.activeElement;
-    const root=document.createElement('section');root.className='updates-drawer';root.setAttribute('aria-label','Workspace updates');root.setAttribute('role','dialog');root.tabIndex=-1;this.drawer=root;
-    root.innerHTML=`<header><h2>Updates</h2><button data-update="close" aria-label="Close updates">×</button></header><div class="updates-tools"><label>Show <select id="updates-filter"><option value="all">All</option><option value="unread">Unread</option><option value="mentions">Mentions</option></select></label><button data-update="read-all">Mark all read</button></div><details class="updates-settings"><summary>Sound & preferences <span id="sound-state"></span></summary><label><input type="checkbox" id="updates-sound">Enable notification sounds</label><button data-update="test">Test sound</button><label>Volume <input id="updates-volume" type="range" min="0" max="1" step="0.05"></label><label>Sound for <select id="updates-mode"><option value="all">All updates</option><option value="mentions">Mentions only</option></select></label><label>Pause sounds <select id="updates-pause"><option value="0">Not paused</option><option value="30">30 minutes</option><option value="60">1 hour</option></select></label><label><input type="checkbox" id="updates-tab">Unread count in tab title</label><p id="updates-audio-status" role="status"></p></details><p id="updates-summary" role="status"></p><div id="updates-list"></div><button data-update="more-groups" hidden>Older conversations</button>`;
+    const root=document.createElement('section');root.className='updates-drawer';root.setAttribute('aria-label','Workspace updates');root.setAttribute('role','dialog');root.tabIndex=-1;this.drawer=root;this.preferencesOpen=false;
+    root.innerHTML=`<header><h2>Updates</h2><button data-update="close" aria-label="Close updates">×</button></header><nav class="updates-tabs" aria-label="Updates views"><button data-update="activity" aria-pressed="true">Activity</button><button data-update="preferences" aria-pressed="false">Preferences</button></nav><div class="updates-tools"><label>Show <select id="updates-filter"><option value="all">All</option><option value="unread">Unread</option><option value="mentions">Mentions</option></select></label><button data-update="read-all">Mark all read</button></div><section class="updates-settings" hidden aria-labelledby="preferences-heading"><h3 id="preferences-heading">Notification preferences</h3><p class="settings-intro">Changes save automatically for your account in this browser.</p><fieldset class="settings-card"><legend>Sound</legend><label class="settings-switch" for="updates-sound"><span>Play notification sounds<small>A gentle chime for new activity, not existing unread updates.</small></span><input type="checkbox" role="switch" id="updates-sound"></label><div class="sound-status-row"><span id="sound-state" role="status"></span><button data-update="test" type="button">Preview sound</button></div><div class="settings-dependent"><label for="updates-mode">When to play a sound</label><select id="updates-mode" aria-describedby="sound-mode-hint"><option value="all">All new updates</option><option value="mentions">Only direct mentions</option></select><p class="settings-hint" id="sound-mode-hint">The conversation you’re actively viewing stays silent.</p><div class="volume-label"><label for="updates-volume">Volume</label><output id="volume-value" for="updates-volume"></output></div><input id="updates-volume" aria-describedby="volume-hint" type="range" min="0" max="1" step="0.05"><p id="volume-hint" class="settings-hint">Preview sound to check the level. Your device volume also applies.</p></div><p id="updates-audio-status" role="status"></p></fieldset><fieldset class="settings-card"><legend>Take a break</legend><p class="settings-hint" id="pause-hint">Pause sounds without hiding updates or marking anything read.</p><label for="updates-pause">Pause sounds for</label><select id="updates-pause" aria-describedby="pause-hint"><option value="0">Not paused</option><option value="30">30 minutes</option><option value="60">1 hour</option></select><button data-update="resume" type="button" hidden>Resume sounds now</button></fieldset><fieldset class="settings-card"><legend>Display</legend><label class="settings-switch" for="updates-tab"><span>Unread count in browser tab<small>Show the count only, never message contents.</small></span><input type="checkbox" role="switch" id="updates-tab"></label></fieldset><p class="settings-hint">Audio may need browser permission. These preferences sync across tabs in this browser, not other devices.</p></section><p id="updates-summary" role="status"></p><div id="updates-list"></div><button data-update="more-groups" hidden>Older conversations</button>`;
     document.body.append(root);root.addEventListener('click',e=>this.click(e).catch(error=>this.error(error)));
+    root.addEventListener('input',e=>{if(e.target.id==='updates-volume')root.querySelector('#volume-value').textContent=Math.round(Number(e.target.value)*100)+'%';});
     root.addEventListener('change',e=>this.change(e).catch(error=>this.error(error)));
-    root.addEventListener('keydown',e=>{if(e.key==='Escape'){e.stopPropagation();this.close();}if(e.key==='Tab'){e.stopPropagation();const all=[...root.querySelectorAll('button:not([hidden]),select,input,summary')].filter(el=>el.getClientRects().length);if(e.shiftKey&&document.activeElement===all[0]){e.preventDefault();all.at(-1)?.focus();}else if(!e.shiftKey&&document.activeElement===all.at(-1)){e.preventDefault();all[0]?.focus();}}});
+    root.addEventListener('keydown',e=>{if(e.key==='Escape'){e.stopPropagation();this.close();}if(e.key==='Tab'){e.stopPropagation();const all=[...root.querySelectorAll('button:not([hidden]),select,input,summary')].filter(el=>!el.disabled&&el.getClientRects().length);if(e.shiftKey&&document.activeElement===all[0]){e.preventDefault();all.at(-1)?.focus();}else if(!e.shiftKey&&document.activeElement===all.at(-1)){e.preventDefault();all[0]?.focus();}}});
     root.querySelector('#updates-filter').value=this.filter;this.controls();await this.refresh();if(root.isConnected)root.querySelector('[data-update=close]').focus();
   }
   controls(){if(!this.drawer)return;const q=s=>this.drawer.querySelector(s);
     q('#updates-sound').checked=this.prefs.enabled;q('#updates-volume').value=this.prefs.volume;q('#updates-mode').value=this.prefs.mode;q('#updates-tab').checked=this.prefs.tab;
-    q('#sound-state').textContent=this.prefs.paused>Date.now()?'· paused until '+new Date(this.prefs.paused).toLocaleTimeString():this.prefs.enabled?'· on':'· muted';
+    q('#sound-state').textContent=this.prefs.paused>Date.now()?'Paused until '+new Date(this.prefs.paused).toLocaleTimeString():this.prefs.enabled?'Sounds on':'Sounds off';
+    q('#volume-value').textContent=Math.round(this.prefs.volume*100)+'%';
+    q('#updates-volume').disabled=!this.prefs.enabled;q('#updates-mode').disabled=!this.prefs.enabled;
+    q('.settings-dependent').classList.toggle('settings-muted',!this.prefs.enabled);
+    q('[data-update=resume]').hidden=this.prefs.paused<=Date.now();
     q('#updates-pause').value=this.prefs.paused>Date.now()?(this.prefs.paused-Date.now()<=1800000?'30':'60'):'0';
     q('#updates-audio-status').textContent=this.audioStatus||'';
   }
   close(){this.drawer?.remove();this.drawer=null;if(this.returnFocus?.isConnected)this.returnFocus.focus();}
   destroy(){this.destroyed=true;this.close();window.removeEventListener('storage',this.storage);this.audio?.close();document.title='Commonroom';}
-  error(error){if(this.drawer)this.drawer.querySelector('[data-update=read-all]').disabled=!this.data.unread;
-    this.drawer.querySelector('#updates-summary').textContent=error.message;}
+  error(error){if(this.drawer)this.drawer.querySelector('#updates-summary').textContent=error.message;}
   label(g){return g.ticket_id?`${g.ticket_key} · ${g.ticket_title}`:`#${this.context().channels.find(c=>c.id===g.channel_id)?.name||'channel'}${g.parent_id?' · Thread':''}`;}
   renderGroups(){
     const root=this.drawer.querySelector('#updates-list');
@@ -82,7 +86,7 @@ export class Updates {
     if(focusGroup&&focusAction&&!focused.isConnected){const article=[...root.querySelectorAll('[data-group]')].find(el=>el.dataset.group===focusGroup);(article?.querySelector(`[data-update="${focusAction}"]`)||this.drawer).focus();}
     this.drawer.querySelector('[data-update=read-all]').disabled=!this.data.unread;
     this.drawer.querySelector('#updates-summary').textContent=`${this.data.unread} unread notifications`;
-    this.drawer.querySelector('[data-update=more-groups]').hidden=!this.data.next;
+    this.drawer.querySelector('[data-update=more-groups]').hidden=this.preferencesOpen||!this.data.next;
   }
   async change(e){const el=e.target;
     if(el.id==='updates-filter'){this.filter=el.value;this.loadedPages=1;await this.refresh();return;}
@@ -95,6 +99,14 @@ export class Updates {
   }
   async click(e){const button=e.target.closest('[data-update]');if(!button)return;
     const action=button.dataset.update,article=button.closest('[data-group]'),g=article&&this.groups.find(g=>g.group_key===article.dataset.group);
+    if(action==='activity'||action==='preferences'){
+      const preferences=action==='preferences';this.drawer.querySelector('.updates-settings').hidden=!preferences;
+      for(const selector of ['.updates-tools','#updates-summary','#updates-list'])this.drawer.querySelector(selector).hidden=preferences;
+      this.drawer.querySelector('[data-update=more-groups]').hidden=preferences||!this.data?.next;
+      for(const name of ['activity','preferences'])this.drawer.querySelector(`[data-update="${name}"]`).setAttribute('aria-pressed',String(action===name));
+      this.preferencesOpen=preferences;return;
+    }
+    if(action==='resume'){this.prefs.paused=0;this.save();return;}
     if(action==='close'){this.close();return;}
     if(action==='test'){await this.chime();return;}
     if(action==='read-all'){await this.mutate('/notifications/read',{through:this.data.latest},'PUT');await this.refresh();return;}
