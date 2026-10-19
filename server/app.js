@@ -233,8 +233,13 @@ export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'dat
       'Content-Disposition': `${attachment.is_image ? 'inline' : 'attachment'}; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(attachment.filename)}` });
     res.sendFile(attachment.disk_path);
   });
-  app.get('/api/notifications', authenticated, (req, res) => res.json(store.inbox.list(req.user.id)));
-  app.put('/api/notifications/read', authenticated, (req, res) => res.json(store.inbox.markRead(req.user.id, req.body.ids)));
+  app.get('/api/notifications', authenticated, (req, res) => {
+    if(req.query.view==='overview') return res.json(store.inbox.overview(req.user.id,req.query));
+    if(req.query.group) return res.json(store.inbox.groupEvents(req.user.id,req.query.group,req.query.before));
+    res.json(store.inbox.list(req.user.id));
+  });
+  app.put('/api/messages/:id/read',authenticated,(req,res)=>res.json(store.inbox.seeReplies(req.user.id,req.params.id,req.body.ids)));
+  app.put('/api/notifications/read', authenticated, (req, res) => res.json(store.inbox.setRead(req.user.id, req.body)));
   app.use('/api', (req, res) => res.status(404).json({ error: 'Endpoint not found.' }));
   app.get('/vendor/marked.js', (req, res) => res.type('application/javascript').sendFile(fileURLToPath(new URL('../node_modules/marked/lib/marked.esm.js', import.meta.url))));
   app.get('/vendor/dompurify.js', (req, res) => res.type('application/javascript').sendFile(fileURLToPath(new URL('../node_modules/dompurify/dist/purify.es.mjs', import.meta.url))));

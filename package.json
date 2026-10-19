@@ -18,7 +18,8 @@
     "test:markdown": "node test/markdown-browser.js",
     "test:codex": "node scripts/smoke-codex.js",
     "test:notifications": "node test/notifications-browser.js",
-    "test:search": "node test/search-browser.js"
+    "test:search": "node test/search-browser.js",
+    "test:updates": "node test/updates-browser.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",

@@ -77,3 +77,13 @@ This version provides public channels, threads, search, a ticket board, message 
 Use **Search Commonroom** in the sidebar or **Ctrl/⌘ K** to search chat messages (including replies), ticket titles/descriptions/keys, and ticket comments. Choose Everything, Chat, Tickets, or Comments. Results show up to 60 newest matches and open the matching conversation or ticket. Search is literal, case-insensitive for ASCII text, and does not index attachment contents. All current channels and tickets are visible to signed-in workspace members.
 
 Run `npm run test:search` for browser search/filter/navigation checks; backend search coverage is included in `npm test`.
+
+## Notification controls
+
+**Updates** now lives in the topbar bell (also available in dialog headers or with **Ctrl/⌘ Shift U**). Its right drawer keeps unsent drafts intact. Filter by All, Unread, or Mentions; updates are grouped by channel, thread, or ticket, with paginated event history. Read/unread and unfollow controls act on your own inbox. Opening the drawer alone does not mark updates read; opening an event marks that event read. Unfollowing does not block direct mentions, and channel subscriptions can still notify you about an unfollowed thread.
+
+**Sound & preferences** provides opt-in sound, a test button, volume, all-updates/mentions-only selection, 30/60-minute pauses, and an optional tab-title count. These preferences are per account in this browser and sync across its tabs, not across devices. Sound requires browser audio permission/user interaction; blocked audio is reported in the drawer. New updates in the focused conversation are silent. Initial loads, repeated polls, and rapid bursts do not repeatedly chime. Web Locks coordinate cross-tab playback where available; LAN HTTP uses a best-effort shared-storage election. Visual updates do not depend on sound. No desktop push, email, or scheduled quiet hours are included.
+
+Thread “N new” badges count replies from other people that you have not viewed, separately from unread inbox events. Only replies intersecting the focused thread viewport are marked viewed; opening the latest page does not clear older unseen replies. Counts and read state are server-backed across devices, without the old 100-row inbox-count limit.
+
+Run `npm run test:updates` for grouped inbox, large unread counts, drafts, responsive layout, and audio-trigger/deduplication checks. `npm run test:notifications` and `BOARD_PUBLIC=1 npm run test:notifications` cover the existing mention/subscription flows on local SSE and public polling.

@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 
-const staticPaths = new Set(['/', '/index.html', '/app.js', '/composer.js', '/markdown.js', '/style.css', '/favicon.svg', '/vendor/marked.js', '/vendor/dompurify.js']);
+const staticPaths = new Set(['/', '/index.html', '/app.js', '/composer.js', '/updates.js', '/markdown.js', '/style.css', '/favicon.svg', '/vendor/marked.js', '/vendor/dompurify.js']);
 const apiRoutes = [
   ['GET', /^\/api\/(session|workspace|search|board|notifications)$/],
   ['GET', /^\/api\/tickets\/[1-9]\d*$/],
@@ -17,7 +17,7 @@ const apiRoutes = [
   ['PUT', /^\/api\/password$/],
   ['PUT', /^\/api\/tickets\/[1-9]\d*(?:\/subscription)?$/],
   ['PUT', /^\/api\/tickets\/[1-9]\d*\/comments\/[1-9]\d*$/],
-  ['PUT', /^\/api\/messages\/[1-9]\d*(?:\/subscription)?$/],
+  ['PUT', /^\/api\/messages\/[1-9]\d*(?:\/(?:subscription|read))?$/],
   ['PUT', /^\/api\/notifications\/read$/],
   ['PUT', /^\/api\/channels\/[1-9]\d*\/(subscription|read)$/],
   ['PUT', /^\/api\/admin\/(users|agents)\/[1-9]\d*$/],

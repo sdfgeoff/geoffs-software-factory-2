@@ -1,0 +1,52 @@
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {existsSync} from 'node:fs';
+import {chromium} from 'playwright';
+import {createApp} from '../server/app.js';
+const dir=await mkdtemp(join(tmpdir(),'updates-browser-')),service=await createApp({dataDir:dir,agentsEnabled:false});let browser;
+try{
+ const {port}=await service.listen(0,'127.0.0.1'),base=`http://127.0.0.1:${port}`;
+ browser=await chromium.launch({headless:true,...(existsSync('/usr/bin/chromium')?{executablePath:'/usr/bin/chromium'}:{})});
+ const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage(),errors=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ const setup=await context.request.post(base+'/api/setup',{data:{username:'admin',display_name:'Admin',password:'updates password'}}),user=await setup.json(),store=service.store;
+ const author=store.createHuman({username:'author',display_name:'Author',password:'updates password'}),channel=store.get('SELECT id FROM channels').id;
+ const parent=store.post(author.id,channel,'Project discussion');for(let i=0;i<125;i++)store.post(author.id,channel,`Update ${i}`,parent.id);
+ store.post(author.id,channel,'Please review @admin');
+ await page.goto(base);await page.locator('#message-input').waitFor();await page.locator('#notice-count').filter({hasText:'99+'}).waitFor();
+ await page.locator('#message-input').fill('Keep this unsent draft');
+ await page.getByRole('button',{name:/Workspace updates/}).click();
+ await page.locator('.update-group').first().waitFor();assert.equal(await page.locator('.update-group').count(),2);
+ assert.match(await page.locator('#updates-summary').textContent(),/127 unread/);
+ await page.locator('#updates-filter').selectOption('mentions');await page.locator('.update-group').filter({hasText:'Please review'}).waitFor();assert.equal(await page.locator('.update-group').count(),1);
+ await page.locator('#updates-filter').selectOption('all');await page.locator('.update-group').filter({hasText:'125 updates'}).waitFor();
+ const group=page.locator('.update-group').filter({hasText:'125 updates'});await group.getByRole('button',{name:'Events',exact:true}).click();await group.locator('.update-event').first().waitFor();assert.equal(await group.locator('.update-event').count(),50);
+ await group.getByRole('button',{name:'Older events',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.update-event').length===100);
+ await page.locator('[data-update=read-all]').click();await page.locator('#updates-summary').filter({hasText:'0 unread'}).waitFor();
+ await page.locator('.update-group').filter({hasText:'125 updates'}).getByRole('button',{name:'Mark unread',exact:true}).click();await page.locator('#updates-summary').filter({hasText:'125 unread'}).waitFor();
+ await page.locator('.updates-settings summary').click();await page.locator('#updates-pause').selectOption('30');await page.locator('#sound-state').filter({hasText:'paused'}).waitFor();
+ await page.screenshot({path:'../notifications-desktop.png',fullPage:true});
+ await page.setViewportSize({width:390,height:844});await page.screenshot({path:'../notifications-mobile.png',fullPage:true});
+ assert.ok(await page.locator('.updates-drawer').evaluate(el=>el.getBoundingClientRect().width<=innerWidth));
+ await page.keyboard.press('Escape');assert.equal(await page.locator('.updates-drawer').count(),0);assert.equal(await page.locator('#message-input').inputValue(),'Keep this unsent draft');
+ await page.bringToFront();await page.locator(`#message-${parent.id} [data-action=thread]`).click();
+ await page.waitForFunction(async()=>{const data=await (await fetch('/api/notifications?view=overview')).json();return data.threads.some(row=>row.unread>0&&row.unread<125);});
+ // Exercise sound logic with isolated module state, a fake audio backend and real Web Locks/storage.
+ const sound=await page.evaluate(async()=>{
+   const {Updates}=await import('/updates.js');let played=0;
+   const make=()=>new Updates({api:async()=>{},mutate:async()=>{},user:{id:98765},context:()=>({focused:false}),changed:()=>{}});
+   const a=make(),b=make();a.chime=b.chime=async()=>{played++;};a.prefs.enabled=b.prefs.enabled=true;
+   const data=id=>({latest:id,groups:[{id,unread:1,mentions:0,channel_id:1}]});
+   await a.sound(data(1));await b.sound(data(1));const baseline=played;
+   await Promise.all([a.sound(data(2)),b.sound(data(2))]);const batch=played;
+   await a.sound(data(2));const duplicate=played;
+   a.lastChime=0;a.prefs.paused=Date.now()+60000;await a.sound(data(3));const paused=played;
+   a.prefs.paused=0;a.prefs.mode='mentions';await a.sound(data(4));const mentions=played;
+   a.prefs.mode='all';a.context=()=>({focused:true,channel:1});await a.sound(data(5));const focused=played;
+   a.destroy();b.destroy();return {baseline,batch,duplicate,paused,mentions,focused};
+ });
+ assert.deepEqual(sound,{baseline:0,batch:1,duplicate:1,paused:1,mentions:1,focused:1});
+ assert.deepEqual(errors,[]);console.log('Updates UI, grouping, >100 totals, read/unread, drafts, responsive layout and sound dedup checks passed');
+}finally{await browser?.close();await service.close();await rm(dir,{recursive:true,force:true});}

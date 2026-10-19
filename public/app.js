@@ -1,3 +1,4 @@
+import { Updates } from '/updates.js';
 import { Composer } from '/composer.js';
 import { renderMarkdown, setMentionUsers } from '/markdown.js';
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -31,6 +32,7 @@ const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" f
 const mark = `<span class="brand-mark">${icon('chat')}</span>`;
 const initials = name => name.split(/\s+/).slice(0, 2).map(n => n[0]).join('').toUpperCase();
 const avatar = (user, small = false) => `<span class="avatar ${user.kind === 'agent' || (!user.kind && user.user_id) ? 'agent-avatar' : `tone-${(user.user_id || user.id || 0) % 5}`} ${small ? 'small' : ''}">${user.kind === 'agent' || (!user.kind && user.user_id) ? icon('spark') : esc(initials(user.display_name || user.username || '?'))}</span>`;
+let updates;
 const state = { workspace: null, channel: null, messages: [], thread: null, drafts: new Map(), source: null, modal: null, models: [], connected: false, adminTab: 'agents', generation: 0, transport: 'events', view: 'chat', board: null, ticketDetail: null, notices: [], chatFiles: new Map(), threadDrafts: new Map() };
 let toastTimer, refreshTimer, modalReturnFocus;
 function toast(message, error = false) { const element = $('#toast'); element.textContent = message; element.className = `visible ${error ? 'error' : ''}`; clearTimeout(toastTimer); toastTimer = setTimeout(() => element.className = '', 4500); }
@@ -39,7 +41,7 @@ async function api(path, options = {}) {
   if (response.headers.get('X-Commonroom-Transport') === 'polling') state.transport = 'polling';
   const result = await response.json();
   if (!response.ok) {
-    if (response.status === 401 && state.workspace && !['/login'].includes(path)) { state.source?.close(); state.workspace = null; await boot(); }
+    if (response.status === 401 && state.workspace && !['/login'].includes(path)) { state.source?.close(); updates?.destroy(); updates=null; seenReplyIds.clear(); state.workspace = null; await boot(); }
     throw new Error(result.error || 'Request failed.');
   }
   return result;
@@ -49,7 +51,7 @@ function modal(title, body, cls = '') {
   if (!state.modal) modalReturnFocus = document.activeElement;
   state.modal = title;
   $('#app').inert = true;
-  $('#modal-root').innerHTML = `<div class="modal-backdrop"><section class="modal ${cls}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><header class="modal-head"><div><span class="eyebrow">COMMONROOM</span><h2>${esc(title)}</h2></div><button class="icon-button" data-action="close-modal" aria-label="Close dialog">${icon('close')}</button></header><div class="modal-body">${body}</div></section></div>`;
+  $('#modal-root').innerHTML = `<div class="modal-backdrop"><section class="modal ${cls}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><header class="modal-head"><div><span class="eyebrow">COMMONROOM</span><h2>${esc(title)}</h2></div>${state.workspace?`<button class="icon-button" data-action="notices" aria-label="Workspace updates">${icon('bell')}</button>`:''}<button class="icon-button" data-action="close-modal" aria-label="Close dialog">${icon('close')}</button></header><div class="modal-body">${body}</div></section></div>`;
   const panel = $('.modal'); panel.tabIndex = -1;
   setTimeout(() => ($('input:not([type=checkbox]),textarea', panel) || panel).focus(), 0);
 }
@@ -76,14 +78,14 @@ function renderAuth(session) {
 }
 function renderShell() {
   const user = state.workspace.user;
-  $('#app').innerHTML = `<div class="workspace"><aside class="rail"><a class="rail-logo" href="/" aria-label="Commonroom">${mark}</a><button class="rail-item selected" data-action="channel-home" aria-label="Channels">${icon('chat')}<span>Chat</span></button><button class="rail-item" data-action="board" aria-label="Ticket board">${icon('board')}<span>Board</span></button><button class="rail-item" data-action="notices" aria-label="Workspace updates">${icon('bell')}<span>Updates</span><span id="notice-count" hidden></span></button><button class="rail-item" data-action="directory" aria-label="People and agents">${icon('people')}<span>People</span></button>${user.role === 'admin' ? `<button class="rail-item" data-action="admin" aria-label="Manage workspace">${icon('settings')}<span>Manage</span></button>` : ''}<div class="rail-spacer"></div><button class="profile-button" data-action="profile" aria-label="Your account">${avatar(user, true)}</button></aside><aside class="sidebar" id="sidebar"><div class="workspace-name"><div><strong>commonroom<span class="workspace-dot">.</span></strong><span>Your local workspace</span></div><span class="tiny-badge">LOCAL</span></div><button class="search-trigger" data-action="search">${icon('search')}<span>Search Commonroom</span><kbd>⌘ K</kbd></button><div class="sidebar-section"><div class="section-heading"><span>CHANNELS</span><button class="icon-button" data-action="create-channel" aria-label="Create a channel">${icon('plus')}</button></div><nav id="channel-nav" aria-label="Channels"></nav><button class="sidebar-link" data-action="create-channel">${icon('plus')}Create a channel</button></div><div class="sidebar-section agents-section"><div class="section-heading"><span>AI AGENTS</span>${user.role === 'admin' ? `<button class="icon-button" data-action="new-agent" aria-label="Create an AI agent">${icon('plus')}</button>` : icon('spark')}</div><div id="agent-nav"></div></div><div class="sidebar-bottom"><div class="connection" id="connection"><i></i> Connecting…</div><p>People & possibilities,<br>all in one room.</p>${icon('chat', 'bottom-doodle')}</div></aside><section class="main-pane"><header class="topbar"><button class="icon-button mobile-menu" data-action="mobile-menu" aria-label="Toggle channels">${icon('menu')}</button><div class="breadcrumb">Workspace ${icon('chevron')} <span id="breadcrumb-channel">general</span></div><button class="topbar-people" data-action="directory" id="topbar-people"></button></header><div class="conversation-layout" id="chat-view"><main class="conversation"><header class="channel-header" id="channel-header"></header><div class="message-scroll" id="message-scroll" tabindex="0" aria-label="Channel messages"><div id="message-list"></div></div><div class="composer-area"><div id="agent-activity" class="agent-activity"></div><form id="composer" class="composer"></form><div class="composer-hint"><span><strong>Enter</strong> to send <span>·</span> <strong>Shift + Enter</strong> for a new line</span><span>Everyone has a voice here.</span></div></div></main><aside id="room-panel" class="room-panel"></aside><aside id="thread-panel" class="thread-panel" hidden></aside></div><section id="board-view" class="board-view" aria-label="Ticket board" hidden><div class="board-heading"><div><span class="eyebrow">WORKSPACE BOARD</span><h1>A place for the work.</h1><p>People and agents, moving things forward.</p></div><button class="button primary" data-action="new-ticket">${icon('plus')}New ticket</button></div><div id="ticket-columns" class="ticket-columns"></div></section></section></div>`;
+  $('#app').innerHTML = `<div class="workspace"><aside class="rail"><a class="rail-logo" href="/" aria-label="Commonroom">${mark}</a><button class="rail-item selected" data-action="channel-home" aria-label="Channels">${icon('chat')}<span>Chat</span></button><button class="rail-item" data-action="board" aria-label="Ticket board">${icon('board')}<span>Board</span></button><button class="rail-item" data-action="directory" aria-label="People and agents">${icon('people')}<span>People</span></button>${user.role === 'admin' ? `<button class="rail-item" data-action="admin" aria-label="Manage workspace">${icon('settings')}<span>Manage</span></button>` : ''}<div class="rail-spacer"></div><button class="profile-button" data-action="profile" aria-label="Your account">${avatar(user, true)}</button></aside><aside class="sidebar" id="sidebar"><div class="workspace-name"><div><strong>commonroom<span class="workspace-dot">.</span></strong><span>Your local workspace</span></div><span class="tiny-badge">LOCAL</span></div><button class="search-trigger" data-action="search">${icon('search')}<span>Search Commonroom</span><kbd>⌘ K</kbd></button><div class="sidebar-section"><div class="section-heading"><span>CHANNELS</span><button class="icon-button" data-action="create-channel" aria-label="Create a channel">${icon('plus')}</button></div><nav id="channel-nav" aria-label="Channels"></nav><button class="sidebar-link" data-action="create-channel">${icon('plus')}Create a channel</button></div><div class="sidebar-section agents-section"><div class="section-heading"><span>AI AGENTS</span>${user.role === 'admin' ? `<button class="icon-button" data-action="new-agent" aria-label="Create an AI agent">${icon('plus')}</button>` : icon('spark')}</div><div id="agent-nav"></div></div><div class="sidebar-bottom"><div class="connection" id="connection"><i></i> Connecting…</div><p>People & possibilities,<br>all in one room.</p>${icon('chat', 'bottom-doodle')}</div></aside><section class="main-pane"><header class="topbar"><button class="icon-button mobile-menu" data-action="mobile-menu" aria-label="Toggle channels">${icon('menu')}</button><div class="breadcrumb">Workspace ${icon('chevron')} <span id="breadcrumb-channel">general</span></div><button class="topbar-updates" data-action="notices" aria-label="Workspace updates">${icon('bell')}<span>Updates</span><span id="notice-count" hidden></span></button><button class="topbar-people" data-action="directory" id="topbar-people"></button></header><div class="conversation-layout" id="chat-view"><main class="conversation"><header class="channel-header" id="channel-header"></header><div class="message-scroll" id="message-scroll" tabindex="0" aria-label="Channel messages"><div id="message-list"></div></div><div class="composer-area"><div id="agent-activity" class="agent-activity"></div><form id="composer" class="composer"></form><div class="composer-hint"><span><strong>Enter</strong> to send <span>·</span> <strong>Shift + Enter</strong> for a new line</span><span>Everyone has a voice here.</span></div></div></main><aside id="room-panel" class="room-panel"></aside><aside id="thread-panel" class="thread-panel" hidden></aside></div><section id="board-view" class="board-view" aria-label="Ticket board" hidden><div class="board-heading"><div><span class="eyebrow">WORKSPACE BOARD</span><h1>A place for the work.</h1><p>People and agents, moving things forward.</p></div><button class="button primary" data-action="new-ticket">${icon('plus')}New ticket</button></div><div id="ticket-columns" class="ticket-columns"></div></section></section></div>`;
   mountChatComposer($('#composer'),'message-input');
   renderNavigation();
 }
 function renderNavigation() {
   if (!state.workspace || !$('#channel-nav')) return;
   const { channels, agents, users } = state.workspace;
-  $('#channel-nav').innerHTML = channels.map(c => `<button class="channel-link ${c.id === state.channel?.id ? 'active' : ''} ${c.unread && c.subscribed ? 'unread' : ''}" data-action="open-channel" data-id="${c.id}"><span class="channel-hash">#</span><span>${esc(c.name)}</span>${c.unread && c.subscribed ? `<span class="unread-count">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}</button>`).join('');
+  $('#channel-nav').innerHTML = channels.map(c => `<button class="channel-link ${c.id === state.channel?.id ? 'active' : ''} ${c.unread && c.subscribed ? 'unread' : ''}" data-action="open-channel" data-id="${c.id}"><span class="channel-hash">#</span><span>${esc(c.name)}</span>${state.mentionChannels?.get(c.id)?`<span class="mention-count" aria-label="${state.mentionChannels.get(c.id)} unread mentions">@${state.mentionChannels.get(c.id)}</span>`:''}${c.unread && c.subscribed ? `<span class="unread-count">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}</button>`).join('');
   $('#agent-nav').innerHTML = agents.length ? agents.map(a => `<button class="agent-link" data-action="agent-detail" data-id="${a.user_id}">${avatar(a, true)}<span>${esc(a.display_name)}<small>${!a.enabled ? 'Paused' : a.status === 'thinking' ? 'Considering a conversation' : a.status === 'error' ? 'Needs attention' : 'Following the conversation'}</small></span><i class="status-dot ${!a.enabled ? 'paused' : a.status}"></i></button>`).join('') : `<div class="sidebar-empty">A seat at the table<br>for a different kind of mind.${state.workspace.user.role === 'admin' ? '<button class="text-button" data-action="new-agent">Add your first agent →</button>' : ''}</div>`;
   $('#topbar-people').innerHTML = `<span class="avatar-stack">${users.filter(u => !u.disabled).slice(0, 3).map(u => avatar(u, true)).join('')}</span><span>${users.filter(u => !u.disabled).length} ${users.filter(u => !u.disabled).length === 1 ? 'member' : 'members'}</span>${icon('people')}`;
   renderChannelHeader(); renderRoom();
@@ -138,14 +140,15 @@ async function loadMessages(toBottom = false) {
 const messageBody = renderMarkdown;
 function messageHtml(m, thread = false) {
   const time = new Date(m.created_at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
-  return `<article class="message ${m.kind === 'agent' ? 'agent-message' : ''}" id="message-${m.id}">${avatar(m)}<div class="message-content"><div class="message-meta"><strong>${esc(m.display_name)}</strong>${m.kind === 'agent' ? '<span class="ai-badge">AI</span>' : ''}<time datetime="${esc(m.created_at)}">${esc(time)}</time>${m.edited_at ? `<span class="edited-marker" title="${esc(new Date(m.edited_at).toLocaleString())}">edited</span>` : ''}</div><div class="message-read"><div class="message-body markdown-content">${messageBody(m.body)}</div>${m.attachments?.length ? `<div class="attachments message-attachments">${attachmentHtml(m.attachments)}</div>` : ''}<div class="message-actions">${!thread ? `<button class="reply-button ${m.replies ? 'has-replies' : ''}" data-action="thread" data-id="${m.id}">${icon('chat')}${m.replies ? `${m.replies} ${m.replies===1?'reply':'replies'}` : 'Reply in thread'}</button>` : ''}${m.user_id === state.workspace.user.id ? `<button class="content-edit-button" data-action="edit-message" data-id="${m.id}">Edit</button>` : ''}</div></div></div></article>`;
+  return `<article class="message ${m.kind === 'agent' ? 'agent-message' : ''}" id="message-${m.id}">${avatar(m)}<div class="message-content"><div class="message-meta"><strong>${esc(m.display_name)}</strong>${m.kind === 'agent' ? '<span class="ai-badge">AI</span>' : ''}<time datetime="${esc(m.created_at)}">${esc(time)}</time>${m.edited_at ? `<span class="edited-marker" title="${esc(new Date(m.edited_at).toLocaleString())}">edited</span>` : ''}</div><div class="message-read"><div class="message-body markdown-content">${messageBody(m.body)}</div>${m.attachments?.length ? `<div class="attachments message-attachments">${attachmentHtml(m.attachments)}</div>` : ''}<div class="message-actions">${!thread ? `<button class="reply-button ${m.replies ? 'has-replies' : ''}" data-action="thread" data-id="${m.id}">${icon('chat')}${m.replies ? `${m.replies} ${m.replies===1?'reply':'replies'}` : 'Reply in thread'}${state.unreadThreads?.get(m.id)?`<span class="thread-unread">${state.unreadThreads.get(m.id)} new</span>`:''}</button>` : ''}${m.user_id === state.workspace.user.id ? `<button class="content-edit-button" data-action="edit-message" data-id="${m.id}">Edit</button>` : ''}</div></div></div></article>`;
 }
 function renderMessages(toBottom = false) {
+  if (!state.channel || !$('#message-scroll')) return;
   const scroller = $('#message-scroll');
   const stick = toBottom || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
   const oldTop = scroller.scrollTop;
   const c = state.channel;
-  const fingerprint = JSON.stringify([c.id,c.description,state.messages]);
+  const fingerprint = JSON.stringify([c.id,c.description,state.messages,[...(state.unreadThreads||[])]]);
   if ($('#message-list').dataset.fingerprint === fingerprint) { if (toBottom) scroller.scrollTop = scroller.scrollHeight; return; }
   $('#message-list').dataset.fingerprint = fingerprint;
   let previousDay = '';
@@ -184,6 +187,7 @@ function renderThread(toBottom = false) {
   list.dataset.fingerprint = fingerprint;
   reconcileContent(list, `${messageHtml(state.thread.parent,true)}<div class="thread-divider">${state.thread.messages.length} ${state.thread.messages.length === 1 ? 'reply' : 'replies'}</div>${state.thread.messages.length >= 100 ? '<button class="load-older" data-action="older-replies">Load earlier replies</button>' : ''}${state.thread.messages.map(m=>messageHtml(m,true)).join('')}`);
   list.scrollTop = stick ? list.scrollHeight : scrollTop;
+  observeVisibleReplies();
 }
 function directory() {
   modal('People & agents', `<p class="muted">Different perspectives. One shared space.</p><div class="directory-list">${state.workspace.users.map(u => `<div class="person-row">${avatar(u)}<div><strong>${esc(u.display_name)}</strong><span>@${esc(u.username)} ${u.disabled ? '· Disabled' : ''}</span></div><span class="pill">${u.kind === 'agent' ? 'AI agent' : u.role === 'admin' ? 'Admin' : 'Member'}</span></div>`).join('')}</div>`);
@@ -337,35 +341,20 @@ async function uploadFiles(files, scope, ticketId, commentId, onUploaded = () =>
   }
 }
 async function refreshNotices() {
-  state.notices=await api('/notifications');
-  const badge=$('#notice-count');if(!badge)return;
-  const count=state.notices.filter(notice=>!notice.read_at).length;
-  badge.hidden=!count;badge.textContent=count>99?'99+':count;
-  $('[data-action="notices"]').setAttribute('aria-label',`Workspace updates${count?`, ${count} unread`:''}`);
-  if(state.modal==='Updates')renderNotices();
+  if (!state.workspace) return;
+  if (!updates || updates.user.id !== state.workspace.user.id) {
+    updates?.destroy();
+    updates = new Updates({api,mutate,user:state.workspace.user,
+      context:()=>({focused:document.hasFocus()&&!document.hidden&&!state.modal&&!updates?.drawer,channel:state.view==='chat'?state.channel?.id:null,thread:state.view==='chat'?state.thread?.parent.id:null,ticket:state.ticketDetail?.id,channels:state.workspace.channels}),
+      open:async notice=>{if(notice.ticket_id){await openBoard();await openTicket(notice.ticket_id);}else if(notice.message_id)await jumpToMessage(notice.message_id);},
+      changed:data=>{state.unreadThreads=new Map(data.threads.map(row=>[row.parent_id,row.unread]));state.mentionChannels=new Map(data.mentions.map(row=>[row.channel_id,row.unread]));renderMessages();renderNavigation();}
+    });
+  }
+  await updates.refresh();
 }
-function renderNotices() {
-  const root=$('#updates-list');if(!root)return;
-  const fingerprint=JSON.stringify(state.notices);if(root.dataset.fingerprint===fingerprint)return;root.dataset.fingerprint=fingerprint;
-  const reasons={mention:'Mentioned you',thread:'Thread you follow',channel:'Channel you follow',ticket:'Ticket you follow'};
-  root.innerHTML=state.notices.map(notice=>{
-    const channel=state.workspace.channels.find(channel=>channel.id===notice.channel_id);
-    const title=notice.ticket_id?`${notice.ticket_key || 'Ticket'} · ${notice.ticket_title || ''}`:`# ${channel?.name || 'channel'}${notice.parent_id?' · Thread':''}`;
-    return `<button class="ticket-notice ${!notice.read_at?'unread':''}" data-action="open-notice" data-id="${notice.id}"><span class="notice-reason"><span>${esc(reasons[notice.reason]||'Workspace update')}</span>${!notice.read_at?'<span class="notice-unread-dot" aria-label="Unread"></span>':''}</span><strong>${esc(title)}</strong><span class="notice-actor">${esc(notice.actor?.display_name || 'Member')}${notice.actor?.kind==='agent'?'<span class="ai-badge">AI</span>':''}</span><p>${esc(notice.body || '')}</p><time>${esc(new Date(notice.created_at).toLocaleString())}</time></button>`;
-  }).join('')||'<p class="search-empty">You’re all caught up.<br>Mentions, followed threads, channels and tickets appear here.</p>';
-  const unread=state.notices.filter(notice=>!notice.read_at).length;
-  $('#updates-summary').textContent=unread?`${unread} unread`:'All caught up';
-  $('[data-action="read-all-notices"]').disabled=!unread;
-}
-async function showNotices() {
-  await refreshNotices();modal('Updates','<div class="updates-toolbar"><span id="updates-summary"></span><button class="button subtle compact" data-action="read-all-notices">Mark all read</button></div><div class="ticket-notices" id="updates-list"></div>','wide');renderNotices();
-}
-async function openNotice(id) {
-  const notice=state.notices.find(notice=>notice.id===id);if(!notice)return;
-  await mutate('/notifications/read',{ids:[id]},'PUT');closeModal();await refreshNotices();
-  if(notice.ticket_id){await openBoard();await openTicket(notice.ticket_id);return;}
-  if(notice.message_id)await jumpToMessage(notice.message_id);
-}
+
+async function showNotices() {await refreshNotices();await updates.show();}
+
 async function jumpToMessage(id) {
   const message=await api(`/messages/${id}`);await openChannel(message.channel_id);
   let target;
@@ -413,8 +402,6 @@ document.addEventListener('click', async event => {
       case 'ticket': await openTicket(id); break;
       case 'ticket-subscription': await mutate(`/tickets/${id}/subscription`, { subscribed: !state.ticketDetail.subscribed }, 'PUT'); await refreshTicketLive(); break;
       case 'notices': await showNotices(); break;
-      case 'open-notice': await openNotice(id); break;
-      case 'read-all-notices': await mutate('/notifications/read',{},'PUT'); await refreshNotices(); break;
       case 'thread-subscription': await mutate(`/messages/${id}/subscription`,{subscribed:!state.thread.subscribed},'PUT'); await openThread(id); toast(state.thread.subscribed?'Following this thread.':'Thread unfollowed. Channel subscriptions still apply.'); break;
       case 'close-modal': closeModal(); break;
       case 'open-channel': await openChannel(id); break;
@@ -430,7 +417,7 @@ document.addEventListener('click', async event => {
       case 'edit-user': userForm(id); break;
       case 'profile': profile(); break;
       case 'search': search(); break;
-      case 'logout': await mutate('/logout', {}); state.source?.close(); closeModal(); state.workspace = null; state.channel = null; state.messages = []; await boot(); break;
+      case 'logout': await mutate('/logout', {}); state.source?.close(); closeModal(); updates?.destroy(); updates=null; seenReplyIds.clear(); state.workspace = null; state.channel = null; state.messages = []; await boot(); break;
       case 'toggle-subscription': await mutate(`/channels/${state.channel.id}/subscription`, { subscribed: !state.channel.subscribed }, 'PUT'); await loadWorkspace(); renderNavigation(); break;
       case 'mobile-menu': $('#sidebar').classList.toggle('mobile-open'); break;
       case 'room-toggle': $('.conversation-layout').classList.toggle('show-room'); break;
@@ -532,7 +519,7 @@ function connectEvents() {
   source.addEventListener('ticket-notifications', () => refreshNotices().catch(() => {}));
   source.addEventListener('notifications', () => refreshNotices().catch(() => {}));
   source.addEventListener('session', async () => {
-    try { const result = await api('/session'); if (!result.user) { source.close(); closeModal(); state.workspace = null; state.channel = null; await boot(); } } catch { connection(false); }
+    try { const result = await api('/session'); if (!result.user) { source.close(); closeModal(); updates?.destroy(); updates=null; seenReplyIds.clear(); state.workspace = null; state.channel = null; await boot(); } } catch { connection(false); }
   });
   source.addEventListener('message', async event => {
     const m = JSON.parse(event.data); mergeCachedMessage(m); scheduleRefresh();
@@ -547,7 +534,7 @@ function connectEvents() {
   });
   source.onerror = async () => {
     connection(false);
-    try { const result = await api('/session'); if (!result.user) { source.close(); closeModal(); state.workspace = null; state.channel = null; await boot(); } } catch { /* EventSource retries automatically. */ }
+    try { const result = await api('/session'); if (!result.user) { source.close(); closeModal(); updates?.destroy(); updates=null; seenReplyIds.clear(); state.workspace = null; state.channel = null; await boot(); } } catch { /* EventSource retries automatically. */ }
   };
 }
 function connectPolling() {
@@ -643,3 +630,23 @@ function mergeThreadHistory(result) {
   const older=state.thread?.parent.id===result.parent.id?state.thread.messages.filter(message=>message.id<(result.messages[0]?.id||0)):[];
   return {...result,messages:[...older,...result.messages]};
 }
+
+// Read only reply elements actually visible in the focused thread viewport.
+let replyReadTimer;
+function observeVisibleReplies() {
+  clearTimeout(replyReadTimer);
+  replyReadTimer=setTimeout(async()=>{
+    if(document.hidden||!document.hasFocus()||state.modal||updates?.drawer||!state.thread||state.view!=='chat')return;
+    const panel=document.querySelector('.thread-messages');if(!panel)return;
+    const bounds=panel.getBoundingClientRect(),ids=[];
+    for(const reply of state.thread.messages){const el=panel.querySelector(`#message-${reply.id}`);if(!el)continue;const rect=el.getBoundingClientRect();if(rect.bottom>bounds.top&&rect.top<bounds.bottom)ids.push(reply.id);}
+    const fresh=ids.filter(id=>!seenReplyIds.has(id));if(!fresh.length)return;
+    try{await mutate(`/messages/${state.thread.parent.id}/read`,{ids:fresh.slice(0,100)},'PUT');fresh.slice(0,100).forEach(id=>seenReplyIds.add(id));await refreshNotices();}catch{}
+  },350);
+}
+const seenReplyIds=new Set();
+document.addEventListener('scroll',event=>{if(event.target.matches?.('.thread-messages'))observeVisibleReplies();},true);
+window.addEventListener('focus',()=>{observeVisibleReplies();if(state.workspace)refreshNotices().catch(()=>{});});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)observeVisibleReplies();});
+
+document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.shiftKey&&event.key.toLowerCase()==='u'&&state.workspace){event.preventDefault();showNotices().catch(error=>toast(error.message,true));}});

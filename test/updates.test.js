@@ -1,0 +1,36 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createApp} from '../server/app.js';
+
+test('unbounded unread totals, grouping, scoped read/unread and exact visible reply receipts',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'updates-test-')),service=await createApp({dataDir:dir,agentsEnabled:false});
+ const {port}=await service.listen(0,'127.0.0.1');t.after(async()=>{await service.close();await rm(dir,{recursive:true,force:true});});
+ const base=`http://127.0.0.1:${port}`;
+ const setup=await fetch(base+'/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'admin',display_name:'Admin',password:'updates password'})});
+ const admin=await setup.json(),cookie=setup.headers.get('set-cookie').split(';')[0],store=service.store;
+ const member=store.createHuman({username:'member',display_name:'Member',password:'updates password'}),channel=store.get('SELECT id FROM channels').id;
+ store.subscribe(member.id,channel,true);
+ const parent=store.post(admin.id,channel,'Parent');
+ const replies=[];for(let i=0;i<125;i++)replies.push(store.post(admin.id,channel,'reply '+i,parent.id));
+ let view=store.inbox.overview(member.id);assert.equal(view.unread,126);assert.equal(view.groups.length,2);assert.equal(view.threads[0].unread,125);
+ store.inbox.setRead(member.id,{group:'thread:'+parent.id,through:replies[100].id});
+ assert.equal(store.inbox.overview(member.id).threads[0].unread,125,'inbox read does not imply seeing replies');
+ store.inbox.seeReplies(member.id,parent.id,[replies[124].id]);
+ assert.equal(store.inbox.overview(member.id).threads[0].unread,124,'unseen older replies remain unread');
+ assert.equal(store.inbox.groupEvents(member.id,'thread:'+parent.id).length,50);
+ const page=store.inbox.groupEvents(member.id,'thread:'+parent.id);assert.equal(store.inbox.groupEvents(member.id,'thread:'+parent.id,page.at(-1).id).length,50);
+ store.inbox.setRead(member.id,{read:true});assert.equal(store.inbox.overview(member.id).unread,0);
+ const id=page[0].id;store.inbox.setRead(admin.id,{ids:[id],read:false});assert.equal(store.inbox.overview(member.id).unread,0,'cannot mutate other inbox');
+ store.inbox.setRead(member.id,{ids:[id],read:false});assert.equal(store.inbox.overview(member.id).unread,1);
+ const other=store.post(admin.id,channel,'other');assert.throws(()=>store.inbox.seeReplies(member.id,parent.id,[replies[0].id,other.id]));
+ assert.equal(store.get('SELECT 1 FROM seen_replies WHERE user_id=? AND message_id=?',member.id,replies[0].id),undefined,'invalid batch rolls back');
+ store.post(admin.id,channel,'Hello @member',parent.id);
+ assert.equal(store.inbox.overview(member.id,{filter:'mentions'}).groups.length,1);
+ const response=await fetch(base+'/api/notifications?view=overview',{headers:{Cookie:cookie}});assert.equal(response.status,200);
+ assert.equal((await fetch(base+'/api/notifications?view=overview')).status,401);
+ for(const body of [{read:'yes'},{ids:[-1]},{group:'thread:1 OR 1=1'}])assert.equal((await fetch(base+'/api/notifications/read',{method:'PUT',headers:{Cookie:cookie,'Content-Type':'application/json'},body:JSON.stringify(body)})).status,400);
+ assert.equal((await fetch(base+`/api/messages/${parent.id}/read`,{method:'PUT',headers:{Cookie:cookie,'Content-Type':'application/json'},body:JSON.stringify({ids:[replies[0].id]})})).status,200);
+});

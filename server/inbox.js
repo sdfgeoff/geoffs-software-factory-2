@@ -22,7 +22,8 @@ export function mentionedUsers(body, users) {
 export class NotificationStore {
   constructor(store) {
     this.store = store;
-    store.db.exec(`CREATE TABLE IF NOT EXISTS thread_subscriptions (
+    store.db.exec(`CREATE TABLE IF NOT EXISTS seen_replies (user_id INTEGER NOT NULL REFERENCES users(id), message_id INTEGER NOT NULL REFERENCES messages(id), PRIMARY KEY(user_id,message_id));
+      CREATE TABLE IF NOT EXISTS thread_subscriptions (
       user_id INTEGER NOT NULL REFERENCES users(id), parent_id INTEGER NOT NULL REFERENCES messages(id),
       subscribed INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, PRIMARY KEY(user_id,parent_id));
       CREATE TABLE IF NOT EXISTS user_notifications (
@@ -33,6 +34,7 @@ export class NotificationStore {
         ticket_id INTEGER REFERENCES tickets(id), event_id INTEGER REFERENCES ticket_activity(id),
         created_at TEXT NOT NULL, read_at TEXT, UNIQUE(user_id,event_key));
       CREATE INDEX IF NOT EXISTS inbox_user ON user_notifications(user_id,id);
+      CREATE INDEX IF NOT EXISTS inbox_unread ON user_notifications(user_id,read_at,id);
       INSERT OR IGNORE INTO thread_subscriptions(user_id,parent_id,created_at)
         SELECT user_id,COALESCE(parent_id,id),MIN(created_at) FROM messages GROUP BY user_id,COALESCE(parent_id,id);
       INSERT OR IGNORE INTO user_notifications(id,user_id,event_key,type,kind,reason,actor_id,body,ticket_id,event_id,created_at,read_at)
@@ -120,6 +122,57 @@ export class NotificationStore {
       const ticket = row.ticket_id ? this.store.tickets.ticket(row.ticket_id) : null;
       return { ...row, actor: this.store.publicUser(row.actor_id), ticket_key: ticket ? `CR-${ticket.id}` : null, ticket_title: ticket?.title || null };
     });
+  }
+  groupClause(key) {
+    if (typeof key !== 'string' || !/^(ticket|thread|channel):[1-9]\d*$/.test(key)) throw new AppError('Invalid notification group.');
+    const [kind,id] = key.split(':');
+    return {sql: kind === 'ticket' ? 'ticket_id=?' : kind === 'thread' ? 'ticket_id IS NULL AND parent_id=?' : 'ticket_id IS NULL AND parent_id IS NULL AND channel_id=?', id:Number(id)};
+  }
+  overview(userId, {filter='all',before,after} = {}) {
+    this.actor(userId);
+    if (!['all','unread','mentions'].includes(filter)) throw new AppError('Invalid notification filter.');
+    const totals=this.store.get(`SELECT COUNT(*) unread,COALESCE(MAX(id),0) latest FROM user_notifications WHERE user_id=? AND read_at IS NULL`,userId);
+    const latest=this.store.get('SELECT COALESCE(MAX(id),0) id FROM user_notifications WHERE user_id=?',userId).id;
+    const where=filter==='unread'?'AND read_at IS NULL':filter==='mentions'?"AND reason='mention'":'';
+    const cursor=before === undefined ? Number.MAX_SAFE_INTEGER : Number(before);
+    if(!Number.isSafeInteger(cursor)||cursor<1) throw new AppError('Invalid cursor.');
+    const key="CASE WHEN ticket_id IS NOT NULL THEN 'ticket:'||ticket_id WHEN parent_id IS NOT NULL THEN 'thread:'||parent_id ELSE 'channel:'||channel_id END";
+    const groups=this.store.all(`SELECT ${key} group_key,MAX(id) id,COUNT(*) total,SUM(read_at IS NULL) unread,SUM(reason='mention' AND read_at IS NULL) mentions FROM user_notifications WHERE user_id=? ${where} GROUP BY group_key HAVING MAX(id)<? ORDER BY id DESC LIMIT 50`,userId,cursor).map(g=>({...g,...this.decorate(this.store.get('SELECT * FROM user_notifications WHERE user_id=? AND id=?',userId,g.id))}));
+    const threads=this.store.all(`SELECT m.parent_id,COUNT(*) unread FROM messages m LEFT JOIN seen_replies s ON s.user_id=? AND s.message_id=m.id WHERE m.parent_id IS NOT NULL AND m.user_id<>? AND s.message_id IS NULL GROUP BY m.parent_id`,userId,userId);
+    const mentions=this.store.all('SELECT channel_id,COUNT(*) unread FROM user_notifications WHERE user_id=? AND read_at IS NULL AND reason=\'mention\' AND channel_id IS NOT NULL GROUP BY channel_id',userId);
+    const since=after===undefined?latest:Number(after);
+    if(!Number.isSafeInteger(since)||since<0)throw new AppError('Invalid notification cursor.');
+    const arrivals=this.store.all(`SELECT MAX(id) id,channel_id,parent_id,ticket_id,COUNT(*) unread,SUM(reason='mention') mentions FROM user_notifications WHERE user_id=? AND id>? AND read_at IS NULL GROUP BY channel_id,parent_id,ticket_id`,userId,since);
+    return {unread:totals.unread,latest,arrivals,groups,threads,mentions,next:groups.length===50?groups.at(-1).id:null};
+  }
+  decorate(row) {
+    const ticket=row.ticket_id?this.store.tickets.ticket(row.ticket_id):null;
+    return {...row,actor:this.store.publicUser(row.actor_id),ticket_key:ticket?`CR-${ticket.id}`:null,ticket_title:ticket?.title||null};
+  }
+  groupEvents(userId,key,before) {
+    this.actor(userId);const group=this.groupClause(key),cursor=before===undefined?Number.MAX_SAFE_INTEGER:Number(before);
+    if(!Number.isSafeInteger(cursor)||cursor<1)throw new AppError('Invalid cursor.');
+    return this.store.all(`SELECT * FROM user_notifications WHERE user_id=? AND ${group.sql} AND id<? ORDER BY id DESC LIMIT 50`,userId,group.id,cursor).map(row=>this.decorate(row));
+  }
+  setRead(userId,{ids,group,read=true,through}={}) {
+    this.actor(userId);
+    if(typeof read!=='boolean') throw new AppError('Read must be a boolean.');
+    if(ids!==undefined&&(!Array.isArray(ids)||ids.length>100||ids.some(id=>!Number.isSafeInteger(id)||id<1)))throw new AppError('Invalid notification IDs.');
+    const cursor=through===undefined?Number.MAX_SAFE_INTEGER:Number(through);
+    if(!Number.isSafeInteger(cursor)||cursor<1)throw new AppError('Invalid cursor.');
+    let sql='UPDATE user_notifications SET read_at=? WHERE user_id=? AND id<=?',args=[read?now():null,userId,cursor];
+    if(group){const clause=this.groupClause(group);sql+=' AND '+clause.sql;args.push(clause.id);}
+    if(ids){if(!ids.length)return {ok:true};sql+=` AND id IN (${ids.map(()=>'?').join(',')})`;args.push(...ids);}
+    this.store.run(sql,...args);this.changed();return {ok:true};
+  }
+  seeReplies(userId,parentId,ids) {
+    this.actor(userId);const root=this.root(parentId);
+    if(!Array.isArray(ids)||ids.length>100||ids.some(id=>!Number.isSafeInteger(id)||id<1))throw new AppError('Invalid reply IDs.');
+    this.store.transaction(()=>{for(const id of ids){
+      if(!this.store.get('SELECT id FROM messages WHERE id=? AND parent_id=?',id,root.id))throw new AppError('Reply not in this thread.');
+      this.store.run('INSERT OR IGNORE INTO seen_replies(user_id,message_id) VALUES(?,?)',userId,id);
+      this.store.run('UPDATE user_notifications SET read_at=? WHERE user_id=? AND message_id=? AND read_at IS NULL',now(),userId,id);
+    }});this.changed();return {ok:true};
   }
   markRead(userId, ids) {
     this.actor(userId);
