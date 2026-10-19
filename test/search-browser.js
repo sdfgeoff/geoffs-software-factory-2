@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {existsSync} from 'node:fs';
+import {chromium} from 'playwright';
+import {createApp} from '../server/app.js';
+const dataDir=await mkdtemp(join(tmpdir(),'commonroom-search-browser-'));
+const service=await createApp({dataDir,agentsEnabled:false});
+let browser;
+try {
+  const {port}=await service.listen(0,'127.0.0.1'),base=`http://127.0.0.1:${port}`;
+  browser=await chromium.launch({headless:true,...(existsSync('/usr/bin/chromium')?{executablePath:'/usr/bin/chromium'}:{})});
+  const context=await browser.newContext(),page=await context.newPage(),errors=[];
+  page.on('pageerror',e=>errors.push(e.message));
+  const response=await context.request.post(base+'/api/setup',{data:{username:'admin',display_name:'Admin',password:'search password test'}});
+  const user=await response.json(),store=service.store,channel=store.get('SELECT id FROM channels').id;
+  const parent=store.post(user.id,channel,'old parent');
+  const reply=store.post(user.id,channel,'needle old reply',parent.id);
+  for(let i=0;i<105;i++) store.post(user.id,channel,'later reply '+i,parent.id);
+  const ticket=store.tickets.create(user.id,{title:'needle ticket',description:'a description'});
+  const comment=store.tickets.comment(user.id,ticket.id,{body:'needle comment'});
+  await page.goto(base);await page.locator('#message-input').waitFor();
+  const search=async(type='all')=>{
+    await page.keyboard.press('Control+k');
+    await page.locator('#search-input').fill('needle');await page.locator('#search-type').selectOption(type);
+    await page.locator('#search-form button').click();await page.locator('.search-result').first().waitFor();
+  };
+  await search();assert.equal(await page.locator('.search-result').count(),3);
+  await page.locator('.search-result[data-type=message]').click();
+  await page.locator(`#thread-panel #message-${reply.id}`).waitFor();
+  await search('ticket');assert.equal(await page.locator('.search-result').count(),1);
+  await page.locator('.search-result').click();await page.locator('#ticket-form').waitFor();
+  assert.equal(await page.locator('#ticket-form [name=title]').inputValue(),'needle ticket');
+  await search('comment');await page.locator('.search-result').click();
+  await page.locator(`#ticket-comment-${comment.id}`).waitFor();
+  await page.keyboard.press('Control+k');await page.locator('#search-input').fill('not present');await page.locator('#search-form button').click();
+  await page.getByText('No matching results.',{exact:true}).waitFor();
+  assert.deepEqual(errors,[]);console.log('Unified search browser checks passed');
+} finally {await browser?.close();await service.close();await rm(dataDir,{recursive:true,force:true});}

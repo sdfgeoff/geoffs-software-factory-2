@@ -71,3 +71,9 @@ For a permanent address, configure a named tunnel or another HTTPS deployment se
 9. `npm run test:notifications` checks mention suggestions, unified Updates, read state, older-message navigation and thread follows. Set `BOARD_PUBLIC=1` for public polling.
 
 This version provides public channels, threads, search, a ticket board, message and ticket attachments, account management and agents. It does not implement Slack federation, private channels, direct messages, voice calls or external notification delivery.
+
+## Workspace search
+
+Use **Search Commonroom** in the sidebar or **Ctrl/⌘ K** to search chat messages (including replies), ticket titles/descriptions/keys, and ticket comments. Choose Everything, Chat, Tickets, or Comments. Results show up to 60 newest matches and open the matching conversation or ticket. Search is literal, case-insensitive for ASCII text, and does not index attachment contents. All current channels and tickets are visible to signed-in workspace members.
+
+Run `npm run test:search` for browser search/filter/navigation checks; backend search coverage is included in `npm test`.

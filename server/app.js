@@ -141,6 +141,29 @@ export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'dat
   });
   app.get('/api/search', authenticated, (req, res) => {
     const query = text(req.query.q, 'Search query', 120);
+    if (req.query.scope === 'workspace') {
+      const type = req.query.type || 'all';
+      if (!['all', 'message', 'ticket', 'comment'].includes(type)) throw new AppError('Invalid search type.');
+      const results = store.all(`SELECT * FROM (
+        SELECT 'message' type,m.id,m.body,m.created_at,m.channel_id,m.parent_id,
+          c.name context,u.display_name,NULL ticket_id,NULL title
+        FROM messages m JOIN channels c ON c.id=m.channel_id JOIN users u ON u.id=m.user_id
+        WHERE instr(lower(m.body),lower(?))>0
+        UNION ALL
+        SELECT 'ticket',t.id,t.description,t.updated_at,NULL,NULL,'CR-'||t.id,u.display_name,t.id,t.title
+        FROM tickets t JOIN users u ON u.id=t.created_by
+        WHERE instr(lower(t.title||char(10)||t.description||char(10)||'CR-'||t.id),lower(?))>0
+        UNION ALL
+        SELECT 'comment',tc.id,tc.body,tc.created_at,NULL,NULL,'CR-'||t.id,u.display_name,t.id,t.title
+        FROM ticket_comments tc JOIN tickets t ON t.id=tc.ticket_id JOIN users u ON u.id=tc.user_id
+        WHERE instr(lower(tc.body),lower(?))>0
+      ) WHERE (?='all' OR type=?) ORDER BY created_at DESC,id DESC LIMIT 60`, query, query, query, type, type);
+      return res.json(results.map(row => {
+        const index = row.body.toLowerCase().indexOf(query.toLowerCase());
+        const start = Math.max(0, index-80);
+        return {...row, body: (start ? '…' : '') + row.body.slice(start,start+300) + (row.body.length > start+300 ? '…' : '')};
+      }));
+    }
     res.json(store.all(`SELECT m.*,u.display_name,u.username,u.kind,c.name channel_name FROM messages m
       JOIN users u ON u.id=m.user_id JOIN channels c ON c.id=m.channel_id WHERE instr(lower(m.body),lower(?))>0 ORDER BY m.id DESC LIMIT 60`, query));
   });
