@@ -13,6 +13,10 @@ const apiRoutes = [
   ['POST', /^\/api\/tickets\/[1-9]\d*\/comments$/],
   ['POST', /^\/api\/channels\/[1-9]\d*\/messages$/],
   ['POST', /^\/api\/admin\/(users|agents)$/],
+  ['GET', /^\/api\/admin\/workers$/],
+  ['POST', /^\/api\/admin\/workers(?:\/[1-9]\d*\/auth)?$/],
+  ['PUT', /^\/api\/admin\/workers\/[1-9]\d*$/],
+  ['POST', /^\/api\/workers\/(?:enroll|heartbeat|claim|jobs\/[1-9]\d*\/(?:tool|complete))$/],
   ['POST', /^\/api\/admin\/agents\/[1-9]\d*\/wake$/],
   ['PUT', /^\/api\/password$/],
   ['PUT', /^\/api\/tickets\/[1-9]\d*(?:\/subscription)?$/],
@@ -64,10 +68,13 @@ export function createPublicGateway({ targetPort = 3000, publicOrigin } = {}) {
     if (!allowed) return reject(response, 404, 'Endpoint not found.');
     const origin = request.headers.origin;
     const fetchSite = request.headers['sec-fetch-site'];
+    const machine=method==='POST'&&/^\/api\/workers\/(?:enroll|heartbeat|claim|jobs\/[1-9]\d*\/(?:tool|complete))$/.test(rawPath);
+    if(machine&&(origin!==undefined||fetchSite!==undefined))return reject(response,403,'Worker endpoints are for authenticated machines.');
+    if(machine&&rawPath!=='/api/workers/enroll'&&!/^Bearer [a-f0-9]{64}$/.test(request.headers.authorization||''))return reject(response,401,'Worker bearer credential required.');
     if ((origin !== undefined && origin !== configured.origin) || (fetchSite !== undefined && !['same-origin', 'none'].includes(fetchSite))) {
       return reject(response, 403, 'Request must come from this public origin.');
     }
-    if (!['GET', 'HEAD'].includes(method) && (origin !== configured.origin || fetchSite !== 'same-origin')) {
+    if (!machine && !['GET', 'HEAD'].includes(method) && (origin !== configured.origin || fetchSite !== 'same-origin')) {
       return reject(response, 403, 'Same-origin browser request required.');
     }
     const headers = safeHeaders(request.headers);

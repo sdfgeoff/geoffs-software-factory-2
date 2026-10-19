@@ -65,14 +65,14 @@ try {
   if (process.env.SMOKE_TRACE) probe.on('notification', msg => { if (['item/completed', 'error'].includes(msg.method)) console.log(JSON.stringify(msg)); });
   try {
     await probe.initialize();
-    const thread = await probe.request('thread/start', { cwd: workspace, sandbox: 'workspace-write', approvalPolicy: 'never',
-      baseInstructions: 'You are testing a sandbox in disposable test directories. Use the built-in command tool to execute the exact Python program requested. Do not ask for elevated permissions. Finish when it has completed.',
-      config: { sandbox_workspace_write: { writable_roots: [], network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: true }, features: { shell_tool: true, unified_exec: true } } });
-    const program = `from pathlib import Path\np=Path(${JSON.stringify(sentinel)})\ntry:\n p.write_text('UNEXPECTED_WRITE')\nexcept OSError as error:\n if error.errno not in (1,13,30): raise\n Path('sandbox-proof.txt').write_text('OUTSIDE_DENIED')\nelse:\n Path('sandbox-proof.txt').write_text('OUTSIDE_ALLOWED')`;
+    const thread = await probe.request('thread/start', { cwd: workspace, sandbox: 'danger-full-access', approvalPolicy: 'never',
+      baseInstructions: 'You are testing authorized full host access in disposable test directories. Use the built-in command tool to execute the exact Python program requested. Finish when it has completed.',
+      config: { features: { shell_tool: true, unified_exec: true } } });
+    const program = `from pathlib import Path\np=Path(${JSON.stringify(sentinel)})\np.write_text('HOST_WRITE_OK')\nfrom urllib.request import urlopen\nimport json\nresult=json.load(urlopen('http://127.0.0.1:${address.port}/api/session', timeout=10))\nassert 'needs_setup' in result\nPath('host-access-proof.txt').write_text('HOST_WRITE_AND_NETWORK_OK')`;
     await probe.turn(thread.thread.id, `Execute python3 -c with this exact program, inside your current working directory:\n${program}`);
-    assert.equal(readFileSync(sentinel, 'utf8'), 'UNCHANGED');
-    assert.equal(readFileSync(join(workspace, 'sandbox-proof.txt'), 'utf8'), 'OUTSIDE_DENIED');
-    console.log('Built-in shell write to a harmless sibling sentinel was denied by the actual sandbox.');
+    assert.equal(readFileSync(sentinel, 'utf8'), 'HOST_WRITE_OK');
+    assert.equal(readFileSync(join(workspace, 'host-access-proof.txt'), 'utf8'), 'HOST_WRITE_AND_NETWORK_OK');
+    console.log('Full-access built-in shell wrote a harmless sibling file and reached a loopback HTTP service.');
   } finally { probe.stop(); }
   console.log(`App server reachable on loopback port ${address.port}; smoke test passed.`);
 } finally {

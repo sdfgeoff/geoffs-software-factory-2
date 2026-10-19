@@ -18,7 +18,11 @@
     "test:markdown": "node test/markdown-browser.js",
     "test:codex": "node scripts/smoke-codex.js",
     "test:notifications": "node test/notifications-browser.js",
-    "test:search": "node test/search-browser.js"
+    "test:search": "node test/search-browser.js",
+    "worker": "node worker/index.js",
+    "test:worker-container": "node test/worker-container.js",
+    "test:worker-codex": "node scripts/smoke-worker.js",
+    "test:workers": "node test/workers-browser.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
@@ -29,5 +33,8 @@
   },
   "devDependencies": {
     "playwright": "^1.56.0"
+  },
+  "bin": {
+    "commonroom-worker": "worker/index.js"
   }
 }

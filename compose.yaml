@@ -1,0 +1,30 @@
+# Run this on each worker machine. Commonroom itself can stay on another host.
+# Use a different Compose project name for each independent worker/state volume.
+services:
+  worker:
+    build:
+      context: .
+      target: worker
+    image: commonroom-worker:local
+    init: true
+    restart: unless-stopped
+    environment:
+      COMMONROOM_SERVER: ${COMMONROOM_SERVER:?Set COMMONROOM_SERVER to the reachable LAN or HTTPS server URL}
+      COMMONROOM_WORKER_STATE: /state
+      COMMONROOM_WORKER_NAME: ${COMMONROOM_WORKER_NAME:-Docker worker}
+      COMMONROOM_WORKER_CAPACITY: ${COMMONROOM_WORKER_CAPACITY:-2}
+      COMMONROOM_ENROLL_FILE: /run/secrets/worker_enrollment
+    volumes:
+      - worker-state:/state
+    secrets:
+      - worker_enrollment
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    stop_grace_period: 30s
+
+volumes:
+  worker-state:
+
+secrets:
+  worker_enrollment:
+    file: ${COMMONROOM_ENROLL_SECRET_FILE:-./worker-enrollment.secret}

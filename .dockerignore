@@ -1,0 +1,12 @@
+.git
+node_modules
+data
+worker-state
+worker-data
+.env
+.env.*
+*.secret
+*.log
+test-results
+
+.commonroom-worker/

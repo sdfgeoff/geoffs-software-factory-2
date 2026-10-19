@@ -1,9 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { createRemoteBridge } from '../worker/bridge.js';
 
 const url = process.env.COMMONROOM_URL;
-const token = process.env.COMMONROOM_AGENT_TOKEN;
+const token = process.env.COMMONROOM_AGENT_TOKEN || process.env.COMMONROOM_WORKER_TOKEN;
+const remote = process.env.COMMONROOM_JOB_ID ? createRemoteBridge({ server: url, token, jobId: process.env.COMMONROOM_JOB_ID, leaseToken: process.env.COMMONROOM_LEASE_TOKEN, workspace: process.env.COMMONROOM_WORKSPACE }) : null;
 if (!url || !token) throw new Error('Commonroom MCP requires its runner-provided URL and agent credential.');
 const server = new McpServer({ name: 'commonroom', version: '0.1.0' }, {
   instructions: 'Explore channels and tickets freely. Subscribe to channels, threads, or tickets for future notifications. The unified inbox explains channel, participating-thread, ticket, and exact @username mention notifications. Chat posts and board mutations require explicit tools; final assistant text stays private and silence is valid.'
@@ -14,7 +16,7 @@ const ticket = z.number().int().positive().describe('Ticket ID from list_tickets
 const attachment = z.number().int().positive().describe('Attachment ID from chat messages, ticket details, or list_attachments');
 const status = z.enum(['draft', 'todo', 'in_progress', 'review', 'done']);
 const ticketFields = { title: z.string().min(1).max(200), description: z.string().max(20000).optional(), status: status.optional(), assignee_id: z.number().int().positive().nullable().optional() };
-const newAttachments = z.array(z.object({ path, name: z.string().min(1).max(240).optional() })).max(10).optional().describe('Files in your own folder to save atomically with the text (10 MiB combined limit, including retained files)');
+const newAttachments = z.array(z.object({ path, name: z.string().min(1).max(240).optional() })).max(10).optional().describe('Files in your own folder to save atomically with the text (10 MiB combined limit for newly added files per save)');
 const composeFields = { body: z.string().max(12000).optional(), attachments: newAttachments };
 const editFields = { ...composeFields, version: z.number().int().positive().describe('Latest version from read_channel or read_ticket'), remove_attachment_ids: z.array(attachment).max(10).optional() };
 const tools = [
@@ -59,15 +61,19 @@ for (const [name, description, schema] of tools) {
   server.registerTool(name, { description, inputSchema,
     annotations: { readOnlyHint: !['subscribe', 'unsubscribe', 'subscribe_thread', 'unsubscribe_thread', 'mark_notifications_read', 'post_message', 'write_file', 'create_directory', 'move_file', 'delete_file', 'create_ticket', 'update_ticket', 'add_ticket_comment', 'edit_message', 'update_ticket_comment', 'subscribe_ticket', 'unsubscribe_ticket', 'attach_file', 'read_attachment'].includes(name), destructiveHint: ['write_file', 'delete_file', 'update_ticket', 'edit_message', 'update_ticket_comment'].includes(name), openWorldHint: false } }, async input => {
     try {
+      let result, ok;
+      if (remote) { result = await remote(name, input); ok = true; }
+      else {
       const response = await fetch(`${url}/internal/agent/tool`, { method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ name, input }), signal: AbortSignal.timeout(15000) });
-      const result = await response.json();
-      if (response.ok && name === 'read_attachment' && result.content_base64 && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(result.mime_type)) {
+      result = await response.json(); ok = response.ok;
+      }
+      if (ok && name === 'read_attachment' && result.content_base64 && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(result.mime_type)) {
         const { content_base64, ...metadata } = result;
         return { content: [{ type: 'text', text: JSON.stringify(metadata) }, { type: 'image', mimeType: result.mime_type, data: content_base64 }] };
       }
-      return { content: [{ type: 'text', text: JSON.stringify(result) }], isError: !response.ok };
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], isError: !ok };
     } catch (error) { return { content: [{ type: 'text', text: error.message }], isError: true }; }
   });
 }

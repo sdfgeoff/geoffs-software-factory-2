@@ -31,8 +31,8 @@ const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" f
 const mark = `<span class="brand-mark">${icon('chat')}</span>`;
 const initials = name => name.split(/\s+/).slice(0, 2).map(n => n[0]).join('').toUpperCase();
 const avatar = (user, small = false) => `<span class="avatar ${user.kind === 'agent' || (!user.kind && user.user_id) ? 'agent-avatar' : `tone-${(user.user_id || user.id || 0) % 5}`} ${small ? 'small' : ''}">${user.kind === 'agent' || (!user.kind && user.user_id) ? icon('spark') : esc(initials(user.display_name || user.username || '?'))}</span>`;
-const state = { workspace: null, channel: null, messages: [], thread: null, drafts: new Map(), source: null, modal: null, models: [], connected: false, adminTab: 'agents', generation: 0, transport: 'events', view: 'chat', board: null, ticketDetail: null, notices: [], chatFiles: new Map(), threadDrafts: new Map() };
-let toastTimer, refreshTimer, modalReturnFocus;
+const state = { workspace: null, channel: null, messages: [], thread: null, drafts: new Map(), source: null, modal: null, models: [], connected: false, adminTab: 'agents', generation: 0, transport: 'events', view: 'chat', board: null, ticketDetail: null, notices: [], workers: [], enrollment: null, chatFiles: new Map(), threadDrafts: new Map() };
+let toastTimer, refreshTimer, modalReturnFocus, workerUiTimer;
 function toast(message, error = false) { const element = $('#toast'); element.textContent = message; element.className = `visible ${error ? 'error' : ''}`; clearTimeout(toastTimer); toastTimer = setTimeout(() => element.className = '', 4500); }
 async function api(path, options = {}) {
   const response = await fetch(`/api${path}`, { ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers }, body: options.body ? JSON.stringify(options.body) : undefined });
@@ -47,13 +47,15 @@ async function api(path, options = {}) {
 const mutate = (path, body, method = 'POST') => api(path, { method, body });
 function modal(title, body, cls = '') {
   if (!state.modal) modalReturnFocus = document.activeElement;
+  clearTimeout(workerUiTimer);
+  state.enrollment = null;
   state.modal = title;
   $('#app').inert = true;
   $('#modal-root').innerHTML = `<div class="modal-backdrop"><section class="modal ${cls}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><header class="modal-head"><div><span class="eyebrow">COMMONROOM</span><h2>${esc(title)}</h2></div><button class="icon-button" data-action="close-modal" aria-label="Close dialog">${icon('close')}</button></header><div class="modal-body">${body}</div></section></div>`;
   const panel = $('.modal'); panel.tabIndex = -1;
   setTimeout(() => ($('input:not([type=checkbox]),textarea', panel) || panel).focus(), 0);
 }
-function closeModal() { state.modal = null; $('#modal-root').innerHTML = ''; $('#app').inert = false; if (modalReturnFocus?.isConnected) modalReturnFocus.focus(); modalReturnFocus = null; }
+function closeModal() { clearTimeout(workerUiTimer); state.enrollment = null; state.modal = null; $('#modal-root').innerHTML = ''; $('#app').inert = false; if (modalReturnFocus?.isConnected) modalReturnFocus.focus(); modalReturnFocus = null; }
 function errorBox(error) { return `<p class="form-error" role="alert">${esc(error)}</p>`; }
 async function boot() {
   const session = await api('/session');
@@ -84,7 +86,7 @@ function renderNavigation() {
   if (!state.workspace || !$('#channel-nav')) return;
   const { channels, agents, users } = state.workspace;
   $('#channel-nav').innerHTML = channels.map(c => `<button class="channel-link ${c.id === state.channel?.id ? 'active' : ''} ${c.unread && c.subscribed ? 'unread' : ''}" data-action="open-channel" data-id="${c.id}"><span class="channel-hash">#</span><span>${esc(c.name)}</span>${c.unread && c.subscribed ? `<span class="unread-count">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}</button>`).join('');
-  $('#agent-nav').innerHTML = agents.length ? agents.map(a => `<button class="agent-link" data-action="agent-detail" data-id="${a.user_id}">${avatar(a, true)}<span>${esc(a.display_name)}<small>${!a.enabled ? 'Paused' : a.status === 'thinking' ? 'Considering a conversation' : a.status === 'error' ? 'Needs attention' : 'Following the conversation'}</small></span><i class="status-dot ${!a.enabled ? 'paused' : a.status}"></i></button>`).join('') : `<div class="sidebar-empty">A seat at the table<br>for a different kind of mind.${state.workspace.user.role === 'admin' ? '<button class="text-button" data-action="new-agent">Add your first agent →</button>' : ''}</div>`;
+  $('#agent-nav').innerHTML = agents.length ? agents.map(a => `<button class="agent-link" data-action="agent-detail" data-id="${a.user_id}">${avatar(a, true)}<span>${esc(a.display_name)}<small>${esc(agentStateLabel(a))} · ${esc(agentLocation(a))}</small></span><i class="status-dot ${!a.enabled || (a.worker_id && !a.worker_online) ? 'paused' : a.status}"></i></button>`).join('') : `<div class="sidebar-empty">A seat at the table<br>for a different kind of mind.${state.workspace.user.role === 'admin' ? '<button class="text-button" data-action="new-agent">Add your first agent →</button>' : ''}</div>`;
   $('#topbar-people').innerHTML = `<span class="avatar-stack">${users.filter(u => !u.disabled).slice(0, 3).map(u => avatar(u, true)).join('')}</span><span>${users.filter(u => !u.disabled).length} ${users.filter(u => !u.disabled).length === 1 ? 'member' : 'members'}</span>${icon('people')}`;
   renderChannelHeader(); renderRoom();
   const active = agents.filter(a => a.enabled && a.status === 'thinking' && a.subscriptions.includes(state.channel?.id));
@@ -99,7 +101,7 @@ function renderChannelHeader() {
 function renderRoom() {
   const c = state.channel; if (!c || !$('#room-panel')) return;
   const agents = state.workspace.agents.filter(a => a.subscriptions.includes(c.id));
-  $('#room-panel').innerHTML = `<div class="room-label">IN THIS ROOM</div><div class="room-symbol">${icon('chat')}</div><h2>Room for<br>good conversation.</h2><p class="room-description">${esc(c.description || 'Share an idea. Ask a question. See where it takes you.')}</p><div class="room-rule"></div><div class="room-label">AGENTS FOLLOWING <span>${agents.length}</span></div>${agents.length ? agents.map(a => `<button class="room-agent" data-action="agent-detail" data-id="${a.user_id}">${avatar(a, true)}<span><strong>${esc(a.display_name)}</strong><small>${!a.enabled ? 'Paused' : a.status === 'thinking' ? 'Thinking' : a.status === 'error' ? 'Needs attention' : 'Subscribed'}</small></span><i class="status-dot ${!a.enabled ? 'paused' : a.status}"></i></button>`).join('') : '<p class="room-empty">No agents following yet.</p>'}<div class="agent-note">${icon('spark')}<p>Agents listen, explore, and join in when they have something to add. Sometimes, they just listen.</p></div><div class="room-bottom"><span class="local-dot"></span> YOUR NETWORK. YOUR ROOM.</div>`;
+  $('#room-panel').innerHTML = `<div class="room-label">IN THIS ROOM</div><div class="room-symbol">${icon('chat')}</div><h2>Room for<br>good conversation.</h2><p class="room-description">${esc(c.description || 'Share an idea. Ask a question. See where it takes you.')}</p><div class="room-rule"></div><div class="room-label">AGENTS FOLLOWING <span>${agents.length}</span></div>${agents.length ? agents.map(a => `<button class="room-agent" data-action="agent-detail" data-id="${a.user_id}">${avatar(a, true)}<span><strong>${esc(a.display_name)}</strong><small>${!a.enabled ? 'Paused' : a.status === 'thinking' ? 'Thinking' : a.status === 'error' ? 'Needs attention' : 'Subscribed'}</small></span><i class="status-dot ${!a.enabled || (a.worker_id && !a.worker_online) ? 'paused' : a.status}"></i></button>`).join('') : '<p class="room-empty">No agents following yet.</p>'}<div class="agent-note">${icon('spark')}<p>Agents listen, explore, and join in when they have something to add. Sometimes, they just listen.</p></div><div class="room-bottom"><span class="local-dot"></span> YOUR NETWORK. YOUR ROOM.</div>`;
 }
 async function loadWorkspace() { state.workspace = await api('/workspace'); setMentionUsers(state.workspace.users,state.workspace.user.id); }
 async function openChannel(id) {
@@ -193,37 +195,34 @@ function channelForm() {
 }
 async function showAdmin(tab = 'agents') {
   state.adminTab = tab;
-  modal('Manage your workspace', `<div class="admin-tabs"><button data-action="admin-tab" data-tab="agents" class="${tab === 'agents' ? 'active' : ''}">AI agents <span>${state.workspace.agents.length}</span></button><button data-action="admin-tab" data-tab="people" class="${tab === 'people' ? 'active' : ''}">People</button><button data-action="admin-tab" data-tab="runtime" class="${tab === 'runtime' ? 'active' : ''}">Codex connection</button></div><div id="admin-content"></div>`, 'wide');
+  modal('Manage your workspace', `<div class="admin-tabs"><button data-action="admin-tab" data-tab="agents" class="${tab === 'agents' ? 'active' : ''}">AI agents <span>${state.workspace.agents.length}</span></button><button data-action="admin-tab" data-tab="people" class="${tab === 'people' ? 'active' : ''}">People</button><button data-action="admin-tab" data-tab="workers" class="${tab === 'workers' ? 'active' : ''}">Workers</button><button data-action="admin-tab" data-tab="runtime" class="${tab === 'runtime' ? 'active' : ''}">Codex connection</button></div><div id="admin-content"></div>`, 'wide');
   renderAdminContent();
+  if (tab === 'workers') { await refreshWorkers(); if (state.modal === 'Manage your workspace' && state.adminTab === 'workers') { renderWorkers(); pollWorkerUi('workers'); } }
   if (tab === 'runtime') {
     $('#admin-content').innerHTML = '<p class="muted">Checking the host’s Codex connection…</p>';
     const info = await api('/admin/codex?refresh=1'); state.models = info.models;
-    if ($('#admin-content') && state.adminTab === 'runtime') $('#admin-content').innerHTML = `<div class="runtime-card"><span class="runtime-symbol">${icon(info.connected ? 'check' : 'info')}</span><h3>${info.connected ? 'Connected to ChatGPT' : 'Connection needs attention'}</h3><p>${info.connected ? `Using this computer’s ${esc(info.plan || 'ChatGPT')} subscription.` : esc(info.error)}</p></div><div class="runtime-details"><div><span>Where agents run</span><strong>This computer</strong></div><div><span>Simultaneous agents</span><strong>2</strong></div><div><span>Notification delivery</span><strong>Persistent, batched queue</strong></div><div><span>Agent conversations</span><strong>Separate, persistent memory</strong></div><div><span>Agent reply limit</span><strong>3 posts per turn · 4 conversation hops</strong></div></div><p class="muted small-text">All agents share the host account’s usage limits. If a turn fails, it retries with a delay, up to five attempts. Saving an agent retries failed notifications. Pause an agent to stop its activity.</p><button class="button subtle" data-action="admin-tab" data-tab="runtime">Check connection again</button>`;
+    if ($('#admin-content') && state.adminTab === 'runtime') $('#admin-content').innerHTML = `<div class="runtime-card"><span class="runtime-symbol">${icon(info.connected ? 'check' : 'info')}</span><h3>${info.connected ? 'Connected to ChatGPT' : 'Connection needs attention'}</h3><p>${info.connected ? `Using this computer’s ${esc(info.plan || 'ChatGPT')} subscription.` : esc(info.error)}</p></div><div class="runtime-details"><div><span>Local agents run on</span><strong>This computer</strong></div><div><span>Remote agents</span><strong>Use their assigned worker</strong></div><div><span>Host access</span><strong>Full access · no approval prompts</strong></div><div><span>Simultaneous agents</span><strong>2</strong></div><div><span>Notification delivery</span><strong>Persistent, batched queue</strong></div><div><span>Agent conversations</span><strong>Separate, persistent memory</strong></div><div><span>Agent reply limit</span><strong>3 posts per turn · 4 conversation hops</strong></div></div><p class="muted small-text">Local agents share this computer’s ChatGPT usage limits. Remote agents use the account connected on their assigned worker. If a turn fails, it retries with a delay, up to five attempts. Saving an agent retries failed notifications. Pause an agent to stop its activity.</p><button class="button subtle" data-action="admin-tab" data-tab="runtime">Check connection again</button>`;
   }
 }
 function renderAdminContent() {
   const root = $('#admin-content'); if (!root) return;
-  if (state.adminTab === 'agents') root.innerHTML = `<div class="admin-section-heading"><p>Independent minds, with room to be themselves.</p><button class="button primary compact" data-action="new-agent">${icon('plus')} New agent</button></div><div class="admin-list">${state.workspace.agents.length ? state.workspace.agents.map(a => `<div class="admin-agent-card"><div class="admin-card-top">${avatar(a)}<div><strong>${esc(a.display_name)}</strong><span>@${esc(a.username)}</span></div><span class="pill ${a.enabled && a.status !== 'error' ? 'green' : ''}">${!a.enabled ? 'Paused' : a.status === 'thinking' ? 'Thinking' : a.status === 'error' ? 'Needs attention' : 'Listening'}</span></div><p class="agent-instructions-preview">${esc(a.instructions)}</p><div class="channel-pills">${a.subscriptions.map(id => `<span>#${esc(state.workspace.channels.find(c => c.id === id)?.name || id)}</span>`).join('') || '<span>No subscriptions</span>'}</div>${a.last_error ? `<div class="inline-error">${esc(a.last_error)}</div>` : ''}<div class="admin-card-footer"><span>${a.pending ? `${a.pending} queued notifications` : 'All caught up'}</span><button class="text-button" data-action="edit-agent" data-id="${a.user_id}">Edit agent ${icon('chevron')}</button></div></div>`).join('') : `<div class="empty-admin">${icon('spark')}<h3>Leave a chair open for AI.</h3><p>Create an agent with its own personality, purpose, and subscriptions.</p><button class="button primary" data-action="new-agent">Create your first agent</button></div>`}</div>`;
+  if (state.adminTab === 'agents') root.innerHTML = `<div class="admin-section-heading"><p>Independent minds, with room to be themselves.</p><button class="button primary compact" data-action="new-agent">${icon('plus')} New agent</button></div><div class="admin-list">${state.workspace.agents.length ? state.workspace.agents.map(a => `<div class="admin-agent-card"><div class="admin-card-top">${avatar(a)}<div><strong>${esc(a.display_name)}</strong><span>@${esc(a.username)}</span></div><span class="pill ${a.enabled && a.status !== 'error' && (!a.worker_id || a.worker_online) ? 'green' : ''}">${esc(agentStateLabel(a))}</span></div><p class="agent-instructions-preview">${esc(a.instructions)}</p><div class="channel-pills">${a.subscriptions.map(id => `<span>#${esc(state.workspace.channels.find(c => c.id === id)?.name || id)}</span>`).join('') || '<span>No subscriptions</span>'}</div>${a.last_error ? `<div class="inline-error">${esc(a.last_error)}</div>` : ''}<div class="admin-card-footer"><span>${esc(agentLocation(a))} · ${a.pending ? `${a.pending} queued` : 'All caught up'}</span><button class="text-button" data-action="edit-agent" data-id="${a.user_id}">Edit agent ${icon('chevron')}</button></div></div>`).join('') : `<div class="empty-admin">${icon('spark')}<h3>Leave a chair open for AI.</h3><p>Create an agent with its own personality, purpose, and subscriptions.</p><button class="button primary" data-action="new-agent">Create your first agent</button></div>`}</div>`;
+  if (state.adminTab === 'workers') renderWorkers();
   if (state.adminTab === 'people') root.innerHTML = `<div class="admin-section-heading"><p>Invite people by creating their accounts.</p><button class="button primary compact" data-action="new-user">${icon('plus')} Add person</button></div>${state.workspace.users.filter(u => u.kind === 'human').map(u => `<div class="person-row">${avatar(u)}<div><strong>${esc(u.display_name)}</strong><span>@${esc(u.username)} · ${u.disabled ? 'Disabled' : u.role}</span></div>${u.id === state.workspace.user.id ? '<span class="pill">You</span>' : `<button class="button subtle compact" data-action="edit-user" data-id="${u.id}">Manage</button>`}</div>`).join('')}`;
 }
 async function agentForm(id = null) {
+  try { await refreshWorkers(); } catch { /* Current assignments remain selectable if the worker list is unavailable. */ }
   const agent = id ? state.workspace.agents.find(a => a.user_id === Number(id)) : null;
-  const a = agent || { subscriptions: state.channel ? [state.channel.id] : [], display_name: '', username: '', instructions: '', model: '', enabled: 1 };
-  modal(agent ? `Edit ${agent.display_name}` : 'Meet your next agent', `<p class="muted">Give them a point of view. Let them choose when to join in.</p><form id="agent-form" data-id="${id || ''}"><div class="form-grid"><label>Name<input name="display_name" value="${esc(a.display_name)}" placeholder="Ada" maxlength="60" required></label><label>Username<input name="username" value="${esc(a.username)}" placeholder="ada" maxlength="32" pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]*" ${agent ? 'disabled' : 'required'}></label></div><label>Personality & instructions<textarea name="instructions" rows="6" maxlength="12000" placeholder="You are Ada, a curious and thoughtful collaborator. You enjoy exploring ideas, asking good questions, and making unexpected connections. Join conversations when you have something useful to add." required>${esc(a.instructions)}</textarea></label>${agent && a.workspace_path ? `<div class="workspace-path"><span>Local workspace folder</span><code>${esc(a.workspace_path)}</code><p>This agent can read and write files here on the host computer.</p></div>` : `<div class="workspace-path"><span>A space of their own</span><p>A dedicated, empty folder is created for this agent on the host computer.</p></div>`}<label>Model<select name="model" id="agent-model"><option value="">Codex default</option>${a.model ? `<option selected value="${esc(a.model)}">${esc(a.model)}</option>` : ''}</select></label><fieldset><legend>Initial channel subscriptions</legend><p class="field-help">The agent can choose to join or leave channels later.</p><div class="checkbox-grid">${state.workspace.channels.map(c => `<label class="checkbox-label"><input type="checkbox" name="subscriptions" value="${c.id}" ${a.subscriptions.includes(c.id) ? 'checked' : ''}><span># ${esc(c.name)}</span></label>`).join('')}</div></fieldset>${agent ? `<label class="switch-label"><input type="checkbox" name="enabled" ${a.enabled ? 'checked' : ''}><span>Agent is active <small>Turn off to pause the agent. Notifications wait until resumed.</small></span></label>` : ''}<div class="form-feedback"></div><div class="form-actions">${agent ? `<button class="button subtle" type="button" data-action="wake-agent" data-id="${a.user_id}" ${!a.enabled ? 'disabled' : ''}>Invite a check-in</button>` : '<span class="small-text muted">A quiet agent is still a good agent.</span>'}<button class="button primary" type="submit">${agent ? 'Save changes' : 'Create agent'} ${icon('spark')}</button></div></form>`, 'wide');
-  try {
-    const form = $('#agent-form');
-    const info = await api('/admin/codex'); state.models = info.models;
-    if (form?.isConnected && $('#agent-model')) {
-      const select = $('#agent-model');
-      select.innerHTML = `<option value="">Codex default</option>${info.models.map(m => `<option value="${esc(m.id)}" ${m.id === a.model ? 'selected' : ''}>${esc(m.name)}${m.default ? ' (default)' : ''}</option>`).join('')}${a.model && !info.models.some(m => m.id === a.model) ? `<option value="${esc(a.model)}" selected>${esc(a.model)}</option>` : ''}`;
-      if (!info.connected) $('.form-feedback', $('#agent-form')).innerHTML = `<p class="notice">${esc(info.error || 'Connect Codex on this computer before your agent can run.')}</p>`;
-    }
-  } catch (error) { toast(error.message, true); }
+  const a = agent || { subscriptions: state.channel ? [state.channel.id] : [], display_name: '', username: '', instructions: '', model: '', enabled: 1, worker_id: null };
+  modal(agent ? `Edit ${agent.display_name}` : 'Meet your next agent', `<p class="muted">Give them a point of view. Let them choose when to join in.</p><form id="agent-form" data-id="${id || ''}"><div class="form-grid"><label>Name<input name="display_name" value="${esc(a.display_name)}" placeholder="Ada" maxlength="60" required></label><label>Username<input name="username" value="${esc(a.username)}" placeholder="ada" maxlength="32" pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]*" ${agent ? 'disabled' : 'required'}></label></div><label>Personality & instructions<textarea name="instructions" rows="6" maxlength="12000" placeholder="You are Ada, a curious and thoughtful collaborator. You enjoy exploring ideas, asking good questions, and making unexpected connections. Join conversations when you have something useful to add." required>${esc(a.instructions)}</textarea></label><label>Run on<select name="worker_id" id="agent-worker">${workerOptions(a)}</select></label><div id="agent-runtime-location"></div><label>Model<select name="model" id="agent-model"><option value="">Codex default</option>${a.model ? `<option selected value="${esc(a.model)}">${esc(a.model)}</option>` : ''}</select></label><fieldset><legend>Initial channel subscriptions</legend><p class="field-help">The agent can choose to join or leave channels later.</p><div class="checkbox-grid">${state.workspace.channels.map(c => `<label class="checkbox-label"><input type="checkbox" name="subscriptions" value="${c.id}" ${a.subscriptions.includes(c.id) ? 'checked' : ''}><span># ${esc(c.name)}</span></label>`).join('')}</div></fieldset>${agent ? `<label class="switch-label"><input type="checkbox" name="enabled" ${a.enabled ? 'checked' : ''}><span>Agent is active <small>Turn off to pause the agent. Notifications wait until resumed.</small></span></label>` : ''}<div class="form-feedback"></div><div class="form-actions">${agent ? `<button class="button subtle" type="button" data-action="wake-agent" data-id="${a.user_id}" ${!a.enabled ? 'disabled' : ''}>Invite a check-in</button>` : '<span class="small-text muted">A quiet agent is still a good agent.</span>'}<button class="button primary" type="submit">${agent ? 'Save changes' : 'Create agent'} ${icon('spark')}</button></div></form>`, 'wide');
+  $('#agent-form').agentRecord = a;
+  await updateAgentRuntime();
+
 }
 function agentDetail(id) {
   const a = state.workspace.agents.find(a => a.user_id === Number(id)); if (!a) return;
   if (state.workspace.user.role === 'admin') { agentForm(id); return; }
-  modal(a.display_name, `<div class="agent-profile">${avatar(a)}<h3>@${esc(a.username)}</h3><span class="pill green">${!a.enabled ? 'Paused' : a.status === 'thinking' ? 'Thinking' : 'Listening'}</span><p>This agent explores conversations and chooses when to contribute.</p><div class="channel-pills">${a.subscriptions.map(id => `<span>#${esc(state.workspace.channels.find(c => c.id === id)?.name)}</span>`).join('')}</div></div>`);
+  modal(a.display_name, `<div class="agent-profile">${avatar(a)}<h3>@${esc(a.username)}</h3><span class="pill green">${!a.enabled ? 'Paused' : a.status === 'thinking' ? 'Thinking' : 'Listening'}</span><p>This agent explores conversations and chooses when to contribute.</p><p>Runs on ${esc(agentLocation(a))}.</p><div class="channel-pills">${a.subscriptions.map(id => `<span>#${esc(state.workspace.channels.find(c => c.id === id)?.name)}</span>`).join('')}</div></div>`);
 }
 function userForm(id = null) {
   const user = id ? state.workspace.users.find(u => u.id === Number(id)) : null;
@@ -393,6 +392,7 @@ async function refreshBoardAndNotices() {
 }
 document.addEventListener('change', async event => {
   const input = event.target;
+  if (input.id === 'agent-worker') { await updateAgentRuntime(); return; }
   if (!input.dataset.upload || !input.files.length) return;
   input.disabled = true;
   try { await uploadFiles([...input.files],input.dataset.upload,input.dataset.ticket,input.dataset.comment); await loadBoard(); await refreshTicketLive(); toast('Files attached.'); }
@@ -406,6 +406,13 @@ document.addEventListener('click', async event => {
   const action = button.dataset.action, id = Number(button.dataset.id);
   try {
     switch (action) {
+      case 'new-worker': workerForm(); break;
+      case 'manage-worker': workerForm(id); break;
+      case 'connect-worker': await beginWorkerAuth(id); break;
+      case 'cancel-worker-auth': await mutate(`/admin/workers/${id}/auth`,{action:'cancel'}); await refreshWorkerAuth(id); break;
+      case 'worker-auth-done': await showAdmin('workers'); break;
+      case 'revoke-worker': await mutate(`/admin/workers/${id}`,{revoked:true},'PUT'); await refreshWorkers(); await showAdmin('workers'); toast('Worker credential revoked. Assigned agents will wait.'); break;
+      case 'copy-worker-command': await copyWorkerCommand(); break;
       case 'edit-message': startMessageEdit(id,button); break;
       case 'edit-comment': startCommentEdit(id,button); break;
       case 'board': await openBoard(); break;
@@ -472,11 +479,12 @@ document.addEventListener('submit', async event => {
   if (submit) submit.disabled = true;
   try {
     switch (form.id) {
+      case 'worker-form': await saveWorker(form,data); break;
       case 'ticket-form': await saveTicket(form, data); break;
       case 'auth-form': await mutate(form.dataset.setup === 'true' ? '/setup' : '/login', data); await boot(); break;
       case 'channel-form': { const channel = await mutate('/channels', data); await loadWorkspace(); closeModal(); await openChannel(channel.id); break; }
       case 'agent-form': {
-        const body = { ...data, subscriptions: new FormData(form).getAll('subscriptions').map(Number), enabled: form.dataset.id ? Boolean(data.enabled) : true };
+        const body = { ...data, worker_id: data.worker_id ? Number(data.worker_id) : null, subscriptions: new FormData(form).getAll('subscriptions').map(Number), enabled: form.dataset.id ? Boolean(data.enabled) : true };
         await mutate(form.dataset.id ? `/admin/agents/${form.dataset.id}` : '/admin/agents', body, form.dataset.id ? 'PUT' : 'POST');
         await loadWorkspace(); renderNavigation(); await showAdmin('agents'); toast(form.dataset.id ? 'Agent updated.' : 'A new mind has joined the room.'); break;
       }
@@ -515,7 +523,7 @@ function connection(connected) {
 function scheduleRefresh() {
   clearTimeout(refreshTimer); refreshTimer = setTimeout(async () => {
     try { await loadWorkspace(); renderNavigation();
-      if (state.modal === 'Manage your workspace' && state.adminTab !== 'runtime') renderAdminContent();
+      if (state.modal === 'Manage your workspace' && !['runtime','workers'].includes(state.adminTab)) renderAdminContent();
     } catch (error) { toast(error.message, true); }
   }, 150);
 }
@@ -561,7 +569,7 @@ function connectPolling() {
       await loadWorkspace();
       if (closed || state.source !== source) return;
       renderNavigation();
-      if (state.modal === 'Manage your workspace' && state.adminTab !== 'runtime') renderAdminContent();
+      if (state.modal === 'Manage your workspace' && !['runtime','workers'].includes(state.adminTab)) renderAdminContent();
       await loadMessages();
       await refreshBoardAndNotices();
       const threadId = state.thread?.parent.id;
@@ -643,3 +651,93 @@ function mergeThreadHistory(result) {
   const older=state.thread?.parent.id===result.parent.id?state.thread.messages.filter(message=>message.id<(result.messages[0]?.id||0)):[];
   return {...result,messages:[...older,...result.messages]};
 }
+
+function agentLocation(agent) {
+  if (!agent.worker_id) return 'This computer';
+  return agent.worker_name || state.workers.find(worker=>worker.id===agent.worker_id)?.name || `Worker ${agent.worker_id}`;
+}
+async function refreshWorkers() { const result=await api('/admin/workers');state.workers=result.workers || [];return state.workers; }
+function workerStatus(worker) { return worker.revoked?'Revoked':worker.online?'Online':worker.last_seen_at?'Offline':'Not connected'; }
+function workerAuthReady(worker) { return worker.auth?.connected===true||worker.auth?.status==='ready'; }
+function workerAuthFlow(worker) { return worker.auth?.flow || worker.auth || {}; }
+function workerAuthPending(worker) { return ['pending','starting','requested','awaiting_user'].includes(workerAuthFlow(worker).status); }
+function workerModels(worker) { return (Array.isArray(worker?.models)?worker.models:[]).map(model=>typeof model==='string'?{id:model,name:model}:{id:model.id||model.model,name:model.name||model.displayName||model.id||model.model,default:model.default||model.isDefault}).filter(model=>model.id); }
+function renderWorkers() {
+  const root=$('#admin-content');if(!root||state.adminTab!=='workers')return;
+  const fingerprint=JSON.stringify(state.workers);if(root.dataset.workerFingerprint===fingerprint)return;root.dataset.workerFingerprint=fingerprint;
+  root.innerHTML=`<div class="admin-section-heading"><p>Run several agents on each connected computer.</p><button class="button primary compact" data-action="new-worker">${icon('plus')}Add worker</button></div><p class="worker-intro">Enroll the worker with one command, then connect its ChatGPT account here. ChatGPT credentials stay on that computer; the enrollment secret only connects the worker to Commonroom.</p><div class="worker-list">${state.workers.map(worker=>`<article class="worker-card" data-worker-id="${worker.id}"><div class="worker-card-heading"><div><h3>${esc(worker.name)}</h3><span>${worker.last_seen_at?`Last seen ${esc(new Date(worker.last_seen_at).toLocaleString())}`:'Waiting for enrollment'}</span></div><span class="pill ${worker.online&&!worker.revoked?'green':''}">${esc(workerStatus(worker))}</span></div><div class="worker-facts"><span>ChatGPT <strong>${workerAuthReady(worker)?'Connected':workerAuthPending(worker)?'Sign-in pending':workerAuthFlow(worker).status==='error'?'Needs attention':'Not connected'}</strong></span><span>Capacity <strong>${worker.capacity} agents</strong></span><span>Models <strong>${workerModels(worker).length}</strong></span></div>${workerAuthReady(worker)&&workerModels(worker).length?`<div class="channel-pills worker-models">${workerModels(worker).slice(0,5).map(model=>`<span>${esc(model.name)}</span>`).join('')}</div>`:''}<div class="worker-card-actions"><button class="text-button" data-action="manage-worker" data-id="${worker.id}">Manage worker ${icon('chevron')}</button>${!worker.revoked?`<button class="button subtle compact" data-action="connect-worker" data-id="${worker.id}" ${!worker.online?'disabled':''}>${workerAuthReady(worker)?'Reconnect ChatGPT':'Connect ChatGPT'}</button>`:''}</div></article>`).join('')||'<div class="empty-admin"><h3>Another computer. More room.</h3><p>Add a worker, connect ChatGPT, then assign one or more agents to it.</p></div>'}</div><p class="worker-footnote">An unavailable worker leaves its agents waiting. They never move to a different computer automatically.</p>`;
+}
+function pollWorkerUi(screen,id) {
+  clearTimeout(workerUiTimer);
+  workerUiTimer=setTimeout(async()=>{
+    const active=screen==='workers'?state.modal==='Manage your workspace'&&state.adminTab==='workers':Number($('#worker-auth-panel')?.dataset.workerId)===id;
+    if(!active)return;
+    try{if(screen==='workers'){await refreshWorkers();if(state.modal==='Manage your workspace'&&state.adminTab==='workers')renderWorkers();}else await refreshWorkerAuth(id);}
+    catch(error){if(screen==='auth'&&$('#worker-auth-panel'))$('#worker-auth-panel').textContent=error.message;}
+    const stillActive=screen==='workers'?state.modal==='Manage your workspace'&&state.adminTab==='workers':Number($('#worker-auth-panel')?.dataset.workerId)===id;
+    if(stillActive)pollWorkerUi(screen,id);
+  },2000);
+}
+function workerForm(id=null) {
+  const worker=id?state.workers.find(worker=>worker.id===id):null;
+  modal(worker?`Manage ${worker.name}`:'Add a worker',`<p class="muted">${worker?'Several agents can share this worker. Changes take effect centrally.':'Give the remote computer a name. One enrollment command connects it to this workspace.'}</p><form id="worker-form" data-id="${worker?.id||''}"><label>Name<input name="name" maxlength="80" placeholder="Studio computer" value="${esc(worker?.name||'')}" required></label><label>Simultaneous agents<input name="capacity" type="number" min="1" max="8" value="${worker?.capacity||2}" required></label><p class="field-help">Each worker defaults to two concurrent agents. Other assigned agents wait for a free slot.</p><div class="form-feedback"></div><button class="button primary full" type="submit">${worker?'Save worker':'Create enrollment command'}</button></form>${worker?`<section class="worker-revoke"><h3>Worker credential</h3><p>${worker.revoked?'This credential is revoked. Add a new worker to enroll this computer again.':'Revoking disconnects this worker. Assigned agents wait until you explicitly move them elsewhere.'}</p>${!worker.revoked?`<button class="button subtle" data-action="revoke-worker" data-id="${worker.id}">Revoke credential</button>`:''}</section>`:''}`);
+}
+async function saveWorker(form,data) {
+  if(form.dataset.id){await mutate(`/admin/workers/${form.dataset.id}`,{name:data.name,capacity:Number(data.capacity)},'PUT');await showAdmin('workers');toast('Worker updated.');return;}
+  const result=await mutate('/admin/workers',{name:data.name,capacity:Number(data.capacity)});await refreshWorkers();showWorkerEnrollment(result.worker,result.enrollment_token);
+}
+const shellArgument=value=>`'${String(value).replace(/'/g,"'\\''")}'`;
+function showWorkerEnrollment(worker,token) {
+  modal(`Connect ${worker.name}`,`<p class="muted">Run this once in a Commonroom checkout on the worker computer. This enrollment secret is shown once.</p><label>Server address<input id="worker-server-url" type="url" value="${esc(location.origin)}" autocomplete="off" spellcheck="false"></label><p id="worker-url-help" class="field-help"></p><label>Enrollment command<textarea id="worker-command" rows="4" readonly spellcheck="false" autocomplete="off" aria-label="Worker enrollment command"></textarea></label><div id="worker-command-feedback" role="alert"></div><div class="form-actions"><button class="button subtle" data-action="copy-worker-command">Copy command</button><button class="button primary" data-action="worker-auth-done">Done</button></div><p class="worker-footnote">The enrollment secret is different from your ChatGPT sign-in. After the worker appears online, choose Connect ChatGPT in Workers. OpenAI credentials remain on that computer.</p>`,'wide');
+  state.enrollment={workerId:worker.id,token};updateWorkerCommand();$('#worker-server-url').addEventListener('input',updateWorkerCommand);
+}
+function updateWorkerCommand() {
+  if(!state.enrollment||!$('#worker-command'))return;
+  const value=$('#worker-server-url').value.trim();let server;
+  try{const parsed=new URL(value);if(!['https:','http:'].includes(parsed.protocol)||parsed.username||parsed.password||parsed.pathname!=='/'||parsed.search||parsed.hash)throw new Error();server=parsed.origin;}
+  catch{$('#worker-command').value='';$('#worker-url-help').textContent='Enter the server’s HTTP or HTTPS address, without a path.';$('[data-action="copy-worker-command"]').disabled=true;return;}
+  const loopback=['localhost','127.0.0.1','[::1]'].includes(new URL(server).hostname);
+  $('#worker-url-help').textContent=loopback?'Other computers cannot reach localhost. Replace it with this server’s LAN or HTTPS address.':'Use an address the worker computer can reach. HTTPS protects enrollment over the internet.';
+  $('#worker-command').value=`npm run worker -- --server ${shellArgument(server)} --enroll ${shellArgument(state.enrollment.token)} --state './worker-data'`;
+  $('[data-action="copy-worker-command"]').disabled=false;
+}
+async function copyWorkerCommand() {
+  const input=$('#worker-command');if(!input?.value)return;
+  try{if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(input.value);else{input.focus();input.select();if(!document.execCommand('copy'))throw new Error();}toast('Enrollment command copied.');}
+  catch{input.focus();input.select();$('#worker-command-feedback').textContent='Command selected. Copy it with Ctrl / ⌘ C.';}
+}
+function safeWorkerAuthUrl(value) {
+  try{const url=new URL(value);return url.protocol==='https:'&&url.hostname==='auth.openai.com'&&!url.port&&!url.username&&!url.password?url.href:null;}catch{return null;}
+}
+async function beginWorkerAuth(id) {
+  await mutate(`/admin/workers/${id}/auth`,{action:'start'});
+  const worker=state.workers.find(worker=>worker.id===id);
+  modal(`Connect ChatGPT · ${worker?.name||'worker'}`,`<div id="worker-auth-panel" data-worker-id="${id}" aria-live="polite"><p class="muted">Starting device sign-in on the worker…</p></div>`,'wide');
+  await refreshWorkerAuth(id);pollWorkerUi('auth',id);
+}
+async function refreshWorkerAuth(id) {
+  await refreshWorkers();const panel=$('#worker-auth-panel');if(Number(panel?.dataset.workerId)!==id)return;
+  const worker=state.workers.find(worker=>worker.id===id);if(!worker){panel.textContent='This worker is no longer registered.';return;}
+  const fingerprint=JSON.stringify([worker.online,worker.revoked,worker.auth]);if(panel.dataset.fingerprint===fingerprint)return;panel.dataset.fingerprint=fingerprint;
+  const auth=workerAuthFlow(worker),url=safeWorkerAuthUrl(auth.verification_url),ready=workerAuthReady(worker)&&!workerAuthPending(worker);
+  panel.innerHTML=ready?`<div class="worker-auth-ready">${icon('check')}<h3>ChatGPT is connected.</h3><p>${esc(worker.name)} is ready to run its assigned agents.</p></div><button class="button primary full" data-action="worker-auth-done">Back to workers</button>`:`<p class="muted">Complete sign-in with the ChatGPT account you want this worker to use. Its OpenAI credentials stay on the worker.</p>${worker.revoked?'<p class="notice">The worker credential was revoked.</p>':!worker.online?'<p class="notice">The worker is offline. Sign-in resumes when it reconnects.</p>':''}${auth.user_code?`<label>Device code<input class="worker-device-code" value="${esc(auth.user_code)}" readonly aria-label="ChatGPT device code" spellcheck="false"></label>`:''}${url?`<a class="button primary full worker-verification-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open OpenAI sign-in ${icon('chevron')}</a>`:`<p class="worker-auth-wait">${auth.status==='error'?'Sign-in needs attention.':auth.status==='cancelled'?'Sign-in cancelled.':'Waiting for the worker to start device sign-in…'}</p>`}${auth.error||worker.auth?.error?`<p class="form-error">${esc(auth.error||worker.auth.error)}</p>`:''}<p class="field-help">${auth.user_code?'Enter this code at the OpenAI page. You can sign in with the same ChatGPT account on each worker.':'The verification link and code will appear here when the worker is ready.'}</p>${auth.status==='error'?`<div class="workspace-path"><span>Sign in directly on the worker</span><code>node worker/index.js --state './worker-data' --auth</code><p>Stop the worker first, use the same state folder as enrollment, then restart it and check the connection here.</p></div>`:''}<div class="form-actions"><button class="button subtle" data-action="cancel-worker-auth" data-id="${id}" ${worker.revoked?'disabled':''}>Cancel sign-in</button><button class="text-button" data-action="worker-auth-done">Back to workers</button></div>`;
+}
+function workerOptions(agent) {
+  const options=[`<option value="" ${!agent.worker_id?'selected':''}>This computer · local</option>`];
+  for(const worker of state.workers)options.push(`<option value="${worker.id}" ${worker.id===agent.worker_id?'selected':''}>${esc(worker.name)} · ${workerStatus(worker).toLowerCase()}</option>`);
+  if(agent.worker_id&&!state.workers.some(worker=>worker.id===agent.worker_id))options.push(`<option value="${agent.worker_id}" selected>${esc(agent.worker_name||`Worker ${agent.worker_id}`)} · unavailable</option>`);
+  return options.join('');
+}
+async function updateAgentRuntime() {
+  const form=$('#agent-form');if(!form)return;const agent=form.agentRecord||{},workerId=Number($('#agent-worker').value)||null,currentModel=$('#agent-model').value;
+  let models=[],connected=false,warning='',worker;
+  if(workerId){worker=state.workers.find(worker=>worker.id===workerId);models=workerModels(worker);connected=Boolean(worker?.online&&!worker.revoked&&workerAuthReady(worker));warning=!worker?'This worker is unavailable. The agent waits here; it will not run on another computer.':worker.revoked?'This worker’s credential is revoked. The agent waits until you explicitly reassign it.':!worker.online?'This worker is offline. Notifications wait for it to reconnect; there is no fallback.':!workerAuthReady(worker)?'Connect this worker’s ChatGPT account in Manage → Workers before it can run agents.':'';}
+  else{try{const info=await api('/admin/codex');models=info.models||[];connected=Boolean(info.connected);warning=info.connected?'':info.error||'Connect Codex on this computer before the agent can run.';}catch(error){warning=error.message;}}
+  if(!form.isConnected||(Number($('#agent-worker').value)||null)!==workerId)return;
+  const name=workerId?(worker?.name||agent.worker_name||`Worker ${workerId}`):'this computer';
+  const sameMachine=(agent.worker_id||null)===workerId,path=sameMachine?agent.workspace_path:null;
+  $('#agent-runtime-location').innerHTML=`<div class="workspace-path"><span>${workerId?`Working folder on ${esc(name)}`:'Local working folder'}</span>${path?`<code>${esc(path)}</code>`:`<p>${agent.user_id&&!sameMachine?'A separate working folder is prepared after reassignment. Existing files and conversation memory stay on the original computer.':`A dedicated, empty working folder is created on ${esc(name)} when the agent is prepared.`}</p>`}<p>${workerId?'Commands, files and network requests execute under the worker’s user account.':'Commands, files and network requests execute under the server’s user account.'}</p></div>${warning?`<p class="notice" role="status">${esc(warning)}</p>`:''}<p class="field-help">${workerId?'Instructions, subscriptions and pause controls remain managed here. The worker receives changes on its next turn.':'This agent uses this computer’s ChatGPT connection.'}</p>`;
+  $('#agent-model').innerHTML=`<option value="">${workerId?'Worker Codex default':'Codex default'}</option>${models.map(model=>`<option value="${esc(model.id)}" ${model.id===currentModel?'selected':''}>${esc(model.name||model.id)}${model.default?' (default)':''}</option>`).join('')}${currentModel&&!models.some(model=>model.id===currentModel)?`<option value="${esc(currentModel)}" selected>${esc(currentModel)} · previously selected</option>`:''}`;
+}
+
+function agentStateLabel(agent) {return !agent.enabled?'Paused':agent.worker_id&&!agent.worker_online?'Waiting for worker':agent.worker_id&&['needs_auth','authenticating'].includes(agent.worker_status)?'Waiting for sign-in':agent.status==='thinking'?'Thinking':agent.status==='error'?'Needs attention':'Listening';}

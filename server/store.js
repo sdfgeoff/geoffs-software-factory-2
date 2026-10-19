@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 import { TicketStore } from './tickets.js';
 import { NotificationStore } from './inbox.js';
+import { Workers } from './workers.js';
 
 export const now = () => new Date().toISOString();
 export const secret = () => randomBytes(32).toString('hex');
@@ -75,15 +76,25 @@ export class Store {
     this.onChange = () => {};
     this.tickets = new TicketStore(this, { dataDir: dirname(path) });
     this.inbox = new NotificationStore(this);
+    this.workers = new Workers(this);
   }
   get(sql, ...args) { return this.db.prepare(sql).get(...args); }
   all(sql, ...args) { return this.db.prepare(sql).all(...args); }
   run(sql, ...args) { return this.db.prepare(sql).run(...args); }
   transaction(fn) {
-    this.db.exec('BEGIN IMMEDIATE');
-    try { const result = fn(); this.db.exec('COMMIT'); return result; }
-    catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    const depth=this.transactionDepth||0; const savepoint=`nested_${depth}`;
+    const frame={commit:[],rollback:[]}; this.transactionFrames??=[];
+    this.db.exec(depth?`SAVEPOINT ${savepoint}`:'BEGIN IMMEDIATE'); this.transactionFrames.push(frame); this.transactionDepth=depth+1;
+    let result;
+    try { result = fn(); this.db.exec(depth?`RELEASE SAVEPOINT ${savepoint}`:'COMMIT'); }
+    catch (error) { this.db.exec(depth?`ROLLBACK TO SAVEPOINT ${savepoint}`:'ROLLBACK'); if(depth)this.db.exec(`RELEASE SAVEPOINT ${savepoint}`); for(const callback of frame.rollback)callback(); throw error; }
+    finally { this.transactionDepth=depth; this.transactionFrames.pop(); }
+    if(depth){const parent=this.transactionFrames.at(-1);parent.commit.push(...frame.commit);parent.rollback.push(...frame.rollback);}
+    else for(const callback of frame.commit)callback();
+    return result;
   }
+  afterCommit(callback) { const frame=this.transactionFrames?.at(-1); if(frame)frame.commit.push(callback);else callback(); }
+  afterRollback(callback) { const frame=this.transactionFrames?.at(-1); if(frame)frame.rollback.push(callback); }
   hasUsers() { return Boolean(this.get('SELECT id FROM users LIMIT 1')); }
   publicUser(id) { return this.get('SELECT id,username,display_name,kind,role,disabled,created_at FROM users WHERE id=?', id); }
   users() { return this.all('SELECT id,username,display_name,kind,role,disabled,created_at FROM users ORDER BY kind DESC,display_name'); }
@@ -207,10 +218,11 @@ export class Store {
     const instructions = text(input.instructions, 'Instructions', 12000);
     const model = text(input.model || '', 'Model', 100, 0);
     const channels = this.validateChannels(input.subscriptions);
+    const workerId = this.workers.validateAssignment(input.worker_id);
     if (this.get('SELECT id FROM users WHERE username=?', name)) throw new AppError('That username is already taken.');
     const result = this.transaction(() => {
       const id = Number(this.run('INSERT INTO users(username,display_name,kind,created_at) VALUES(?,?,\'agent\',?)', name, display, now()).lastInsertRowid);
-      this.run('INSERT INTO agents(user_id,instructions,model,created_at) VALUES(?,?,?,?)', id, instructions, model, now());
+      this.run('INSERT INTO agents(user_id,instructions,model,worker_id,created_at) VALUES(?,?,?,?,?)', id, instructions, model, workerId, now());
       for (const channelId of channels) this.subscribe(id, channelId, true);
       this.run('INSERT INTO notifications(agent_id,kind,due_at) VALUES(?,\'welcome\',?)', id, Date.now() + 2000);
       return id;
@@ -224,14 +236,17 @@ export class Store {
     return [...new Set(value)];
   }
   updateAgent(id, input) {
-    if (!this.get('SELECT user_id FROM agents WHERE user_id=?', id)) throw new AppError('Agent not found.', 404);
+    const previous=this.get('SELECT * FROM agents WHERE user_id=?', id);
+    if (!previous) throw new AppError('Agent not found.', 404);
     const display = text(input.display_name, 'Display name', 60);
     const instructions = text(input.instructions, 'Instructions', 12000);
     const model = text(input.model || '', 'Model', 100, 0);
     const channels = this.validateChannels(input.subscriptions);
+    const workerId=this.workers.validateAssignment(input.worker_id,previous.worker_id);
     this.transaction(() => {
+      this.workers.cancelAgent(id);
       this.run('UPDATE users SET display_name=? WHERE id=?', display, id);
-      this.run('UPDATE agents SET instructions=?,model=?,enabled=?,last_error=NULL,status=\'idle\' WHERE user_id=?', instructions, model, input.enabled ? 1 : 0, id);
+      this.run('UPDATE agents SET instructions=?,model=?,worker_id=?,enabled=?,last_error=NULL,status=\'idle\' WHERE user_id=?', instructions, model, workerId, input.enabled ? 1 : 0, id);
       this.run('DELETE FROM subscriptions WHERE user_id=?', id);
       for (const channelId of channels) this.subscribe(id, channelId, true);
       this.run('UPDATE notifications SET status=\'pending\',attempts=0,due_at=? WHERE agent_id=? AND status=\'failed\'', Date.now(), id);

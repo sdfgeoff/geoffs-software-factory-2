@@ -3,3 +3,9 @@ data/
 test-results/
 .env
 *.log
+worker-state/
+worker-data/
+*.secret
+.env.*
+
+.commonroom-worker/

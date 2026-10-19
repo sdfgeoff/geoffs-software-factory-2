@@ -12,6 +12,7 @@ const cookie = req => /(?:^|;\s*)commonroom=([a-f0-9]{64})(?:;|$)/.exec(req.head
 export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'data'), agentsEnabled = process.env.AGENTS_ENABLED !== 'false', clientFactory } = {}) {
   const store = new Store(resolve(dataDir, 'commonroom.sqlite'));
   const agents = new Agents(store, { dataDir, enabled: agentsEnabled, clientFactory });
+  const workers=store.workers; workers.attachRuntime(agents);
   const app = express(); const server = createServer(app); const streams = new Set();
   const hosts = new Set(['localhost', '127.0.0.1', '[::1]', hostname(), `${hostname()}.local`, ...(process.env.ALLOWED_HOSTS || '').split(',').filter(Boolean)]);
   for (const addresses of Object.values(networkInterfaces())) for (const address of addresses || []) hosts.add(address.family === 'IPv6' ? `[${address.address}]` : address.address);
@@ -23,6 +24,7 @@ export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'dat
     try { host = new URL(`http://${req.headers.host}`).hostname; } catch { return res.status(400).json({ error: 'Invalid host.' }); }
     if (!hosts.has(host)) return res.status(403).json({ error: 'Host not allowed. Add your local hostname to ALLOWED_HOSTS.' });
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+      if(req.path.startsWith('/api/workers/')&&(req.headers.origin!==undefined||req.headers['sec-fetch-site']!==undefined))return res.status(403).json({error:'Worker endpoints require machine credentials without browser origin headers.'});
       if (req.headers['sec-fetch-site'] === 'cross-site') return res.status(403).json({ error: 'Cross-site request rejected.' });
       if (req.headers.origin) {
         try { if (new URL(req.headers.origin).host !== req.headers.host) throw new Error(); }
@@ -35,6 +37,7 @@ export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'dat
   // File tools accept 256 KiB of text, which can expand when JSON-escaped.
   app.use('/internal/agent/tool', express.json({ limit: '2mb' }));
   app.use('/api/attachments', express.json({ limit: '15mb' }));
+  app.use(/^\/api\/workers\/jobs\/[1-9]\d*\/tool$/,express.json({limit:'15mb'}));
   const compositionJson = express.json({ limit: '15mb' });
   app.use((req, res, next) => {
     const composeRoute = req.method === 'POST' && /^\/api\/(?:channels\/[1-9]\d*\/messages|tickets\/[1-9]\d*\/comments)$/.test(req.path);
@@ -46,6 +49,7 @@ export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'dat
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); req.user = store.session(cookie(req)); next(); });
   const authenticated = (req, res, next) => req.user ? next() : res.status(401).json({ error: 'Please sign in.' });
   const admin = (req, res, next) => req.user?.role === 'admin' ? next() : res.status(403).json({ error: 'Admin access required.' });
+  const workerAuth=(req,res,next)=>{try{req.worker=workers.authenticate(req.headers.authorization?.replace(/^Bearer /,''));next();}catch(error){next(error);}};
   const setCookie = (res, token, maxAge = 604800) => res.setHeader('Set-Cookie', `commonroom=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${process.env.COOKIE_SECURE === 'true' ? '; Secure' : ''}`);
   const attempts = new Map();
   const loginLimit = (req, res, next) => {
@@ -83,9 +87,10 @@ export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'dat
   });
   app.get('/api/workspace', authenticated, (req, res) => {
     const agentList = store.agents().map(a => ({ user_id: a.user_id, display_name: a.display_name, username: a.username,
-      enabled: a.enabled, status: a.status, subscriptions: a.subscriptions, pending: a.pending,
+      enabled: a.enabled, status: a.status, subscriptions: a.subscriptions, pending: a.pending,worker_id:a.worker_id,
+      ...(a.worker_id?{worker_name:workers.public(workers.row(a.worker_id)).name,worker_status:workers.public(workers.row(a.worker_id)).status,worker_online:workers.public(workers.row(a.worker_id)).online}:{worker_name:'This computer',worker_status:'local',worker_online:true}),
       ...(req.user.role === 'admin' ? { instructions: a.instructions, model: a.model, last_error: a.last_error, last_run_at: a.last_run_at,
-        workspace_path: agents.workspacePath(a.user_id) } : {}) }));
+        workspace_path: a.worker_id?store.get('SELECT workspace_path FROM worker_agent_state WHERE worker_id=? AND agent_id=?',a.worker_id,a.user_id)?.workspace_path||null:agents.workspacePath(a.user_id) } : {}) }));
     res.json({ user: req.user, users: store.users(), channels: store.channels(req.user.id), agents: agentList,
       runtime_enabled: agentsEnabled });
   });
@@ -194,7 +199,7 @@ export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'dat
   });
   app.post('/api/admin/agents', authenticated, admin, (req, res) => {
     const agent = store.createAgent(req.body);
-    const workspace_path = agents.ensureWorkspace(agent.user_id);
+    const workspace_path = agent.worker_id?null:agents.ensureWorkspace(agent.user_id);
     res.status(201).json({ ...agent, workspace_path });
   });
   app.put('/api/admin/agents/:id', authenticated, admin, async (req, res) => {
@@ -202,6 +207,7 @@ export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'dat
     // Validate fully before interrupting the existing agent.
     text(req.body.display_name, 'Display name', 60); text(req.body.instructions, 'Instructions', 12000);
     text(req.body.model || '', 'Model', 100, 0); store.validateChannels(req.body.subscriptions);
+    workers.validateAssignment(req.body.worker_id,store.get('SELECT worker_id FROM agents WHERE user_id=?',id)?.worker_id||null);
     await agents.cancel(id); store.updateAgent(id, req.body); res.json({ ok: true });
   });
   app.post('/api/admin/agents/:id/wake', authenticated, admin, (req, res) => {
@@ -217,6 +223,15 @@ export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'dat
     const token = req.headers.authorization?.replace(/^Bearer /, '');
     res.json(agents.tool(token, req.body.name, req.body.input));
   });
+  app.get('/api/admin/workers',authenticated,admin,(req,res)=>res.json({workers:workers.list()}));
+  app.post('/api/admin/workers',authenticated,admin,(req,res)=>res.status(201).json(workers.create(req.body)));
+  app.put('/api/admin/workers/:id',authenticated,admin,(req,res)=>res.json(workers.update(req.params.id,req.body)));
+  app.post('/api/admin/workers/:id/auth',authenticated,admin,(req,res)=>res.json(workers.auth(req.params.id,req.body)));
+  app.post('/api/workers/enroll',loginLimit,(req,res)=>res.json(workers.enroll(req.body)));
+  app.post('/api/workers/heartbeat',workerAuth,(req,res)=>res.json(workers.heartbeat(req.worker,req.body)));
+  app.post('/api/workers/claim',workerAuth,(req,res)=>res.json(workers.claim(req.worker)));
+  app.post('/api/workers/jobs/:id/tool',workerAuth,(req,res)=>res.json(workers.tool(req.worker,req.params.id,req.body)));
+  app.post('/api/workers/jobs/:id/complete',workerAuth,(req,res)=>res.json(workers.complete(req.worker,req.params.id,req.body)));
   app.get('/api/board', authenticated, (req, res) => res.json(store.tickets.board(req.user.id)));
   app.post('/api/tickets', authenticated, (req, res) => res.status(201).json(store.tickets.create(req.user.id, req.body)));
   app.get('/api/tickets/:id', authenticated, (req, res) => res.json(store.tickets.detail(req.user.id, req.params.id)));
@@ -245,13 +260,13 @@ export async function createApp({ dataDir = resolve(process.env.DATA_DIR || 'dat
     if (status >= 500) console.error(error);
     res.status(status).json({ error: status >= 500 ? 'Something went wrong on the server.' : error.message });
   });
-  return { app, store, agents, server,
+  return { app, store, agents, workers, server,
     async listen(port = 3000, host = '0.0.0.0') {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
-      agents.start(server.address().port); return server.address();
+      agents.start(server.address().port); workers.start(); return server.address();
     },
     async close() {
-      await agents.stop(); for (const s of streams) s.res.end();
+      workers.stop(); await agents.stop(); for (const s of streams) s.res.end();
       await new Promise(resolve => server.close(resolve)); store.close();
     }
   };

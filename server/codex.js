@@ -6,21 +6,16 @@ import { homedir } from 'node:os';
 import { EventEmitter } from 'node:events';
 
 // Only authentication is shared with the host. Personal plugins, MCPs, and shell settings are not.
-export function prepareCodexHome(dataDir) {
+export function prepareCodexHome(dataDir, { shareAuth = true } = {}) {
   const target = resolve(dataDir, 'codex');
   mkdirSync(target, { recursive: true, mode: 0o700 });
   const source = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'auth.json');
   const auth = join(target, 'auth.json');
-  if (existsSync(source) && !existsSync(auth) && resolve(source) !== resolve(auth)) symlinkSync(source, auth);
+  if (shareAuth && existsSync(source) && !existsSync(auth) && resolve(source) !== resolve(auth)) symlinkSync(source, auth);
   writeFileSync(join(target, 'config.toml'), `approval_policy = "never"
-sandbox_mode = "workspace-write"
-web_search = "disabled"
+sandbox_mode = "danger-full-access"
+web_search = "live"
 project_doc_max_bytes = 0
-[sandbox_workspace_write]
-writable_roots = []
-network_access = false
-exclude_tmpdir_env_var = true
-exclude_slash_tmp = true
 [features]
 shell_tool = true
 unified_exec = true
@@ -50,6 +45,7 @@ export class CodexClient extends EventEmitter {
     // Do not inherit API keys: this app explicitly uses the computer's ChatGPT login.
     const env = { ...process.env, CODEX_HOME: codexHome };
     delete env.OPENAI_API_KEY; delete env.CODEX_API_KEY;
+    for (const key of Object.keys(env)) if (/^COMMONROOM_(ENROLL|WORKER_TOKEN|AGENT_TOKEN)/.test(key)) delete env[key];
     this.proc = spawn(binary, ['app-server', '--listen', 'stdio://'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     this.proc.stdin.on('error', () => {});
     this.stderr = '';
@@ -64,7 +60,7 @@ export class CodexClient extends EventEmitter {
         if (message.error) pending.reject(new Error(message.error.message));
         else pending.resolve(message.result);
       } else if (message.id !== undefined) {
-        // Commands and edits inside the sandbox run normally. Never grant sandbox escapes or extra permissions.
+        // Full-access commands and edits run without approval prompts. Unexpected interactive requests have no human responder.
         const results = {
           'item/commandExecution/requestApproval': { decision: 'decline' },
           'item/fileChange/requestApproval': { decision: 'decline' },
@@ -131,5 +127,9 @@ export class CodexClient extends EventEmitter {
       this.activeTurn = null;
     }
   }
-  stop() { this.proc.kill('SIGTERM'); }
+  stop() {
+    if (this.closed || this.stopping) return;
+    this.stopping = true; this.proc.kill('SIGTERM');
+    const force = setTimeout(() => { if (!this.closed) this.proc.kill('SIGKILL'); }, 2000); force.unref();
+  }
 }

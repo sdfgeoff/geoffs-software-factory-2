@@ -234,12 +234,11 @@ export class TicketStore {
   }
   atomicFiles(fn) {
     const files = { created: [], removed: [] };
-    let result;
-    try { result = this.store.transaction(() => fn(files)); }
-    catch (error) { for (const path of files.created) { try { unlinkSync(path); } catch {} } throw error; }
-    // Removed bytes remain available until their metadata change has committed.
-    for (const path of files.removed) { try { unlinkSync(path); } catch {} }
-    return result;
+    return this.store.transaction(() => {
+      this.store.afterRollback(()=>{for(const path of files.created){try{unlinkSync(path);}catch{}}});
+      this.store.afterCommit(()=>{for(const path of files.removed){try{unlinkSync(path);}catch{}}});
+      return fn(files);
+    });
   }
   applyComposition(userId, context, prepared, files) {
     for (const row of prepared.removed) {
@@ -316,10 +315,8 @@ export class TicketStore {
     }
     if (ticketId) this.ticket(ticketId);
     const fileKey = randomUUID(); const path = join(this.uploadDir, fileKey);
-    writeFileSync(path, bytes, { mode: 0o600, flag: 'wx' });
-    let id;
-    try {
-      id = this.store.transaction(() => {
+    const id = this.atomicFiles(files => {
+        files.created.push(path); writeFileSync(path, bytes, { mode: 0o600, flag: 'wx' });
         const id = Number(this.store.run('INSERT INTO ticket_attachments(filename,file_key,mime_type,size,scope,ticket_id,comment_id,message_id,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)', name, fileKey, imageType(bytes), bytes.length, scope, ticketId, commentId, messageId, userId, now()).lastInsertRowid);
         if (ticketId) {
           if (commentId) this.store.run('UPDATE ticket_comments SET version=version+1,edited_at=? WHERE id=?', now(), commentId);
@@ -332,7 +329,6 @@ export class TicketStore {
         }
         return id;
       });
-    } catch (error) { unlinkSync(path); throw error; }
     if (messageId) { this.store.onChange('message', this.store.message(messageId)); this.store.inbox.changed(); }
     else this.changed(ticketId);
     const { disk_path, ...attachment } = this.attachment(userId, id);

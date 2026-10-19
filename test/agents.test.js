@@ -66,8 +66,11 @@ test('a successful silent turn never posts private final text and resumes its me
   assert.equal(calls.filter(c => c.method === 'thread/resume').length, 1);
 });
 
-test('new and resumed agents use normal tools with writes limited to their own initially empty folder', async t => {
-  const { store, agents, calls, clientOptions, make, due } = await fixture(t);
+test('new and resumed agents have full host access with their own initially empty working folders', async t => {
+  const { store, agents, calls, clientOptions, make, due } = await fixture(t, async ({ prompt }) => {
+    assert.match(prompt, /Current host access policy: danger-full-access with approvalPolicy never/);
+    assert.match(prompt, /replaces any earlier read-only, workspace-only, no-network or shell-unavailable policy/);
+  });
   const first = make('first-worker');
   const second = make('second-worker');
   const firstPath = agents.ensureWorkspace(first.user_id);
@@ -86,11 +89,11 @@ test('new and resumed agents use normal tools with writes limited to their own i
   assert.deepEqual(threads.map(call => call.params.cwd), [firstPath, firstPath, secondPath]);
   assert.deepEqual(clientOptions.map(options => options.cwd), [firstPath, firstPath, secondPath]);
   for (const { params } of threads) {
-    assert.equal(params.sandbox, 'workspace-write');
+    assert.equal(params.sandbox, 'danger-full-access');
     assert.equal(params.approvalPolicy, 'never');
-    assert.deepEqual(params.config.sandbox_workspace_write, {
-      writable_roots: [], network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: true,
-    });
+    assert.equal(params.config.sandbox_workspace_write, undefined);
+    assert.match(params.baseInstructions, /host owner has authorized full host access/);
+    assert.doesNotMatch(params.baseInstructions, /Disk writes are sandboxed|Do not access other agents/);
     assert.equal(params.config.features.shell_tool, true);
     assert.equal(params.config.features.unified_exec, true);
   }
@@ -98,19 +101,17 @@ test('new and resumed agents use normal tools with writes limited to their own i
   assert.deepEqual(await readdir(secondPath), []);
 });
 
-test('private Codex defaults enable command tools without writable temporary or extra directories', async t => {
+test('private Codex defaults enable full host access and live web search without approval prompts', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'commonroom-codex-config-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const home = prepareCodexHome(dataDir);
   const config = await readFile(join(home, 'config.toml'), 'utf8');
-  assert.match(config, /^sandbox_mode = "workspace-write"$/m);
+  assert.match(config, /^sandbox_mode = "danger-full-access"$/m);
   assert.match(config, /^shell_tool = true$/m);
   assert.match(config, /^unified_exec = true$/m);
   assert.match(config, /^approval_policy = "never"$/m);
-  assert.match(config, /^writable_roots = \[\]$/m);
-  assert.match(config, /^network_access = false$/m);
-  assert.match(config, /^exclude_tmpdir_env_var = true$/m);
-  assert.match(config, /^exclude_slash_tmp = true$/m);
+  assert.match(config, /^web_search = "live"$/m);
+  assert.doesNotMatch(config, /sandbox_workspace_write|network_access = false|exclude_slash_tmp/);
 });
 
 test('MCP tools act as the authenticated agent, manage subscriptions and cap posts', async t => {
